@@ -10,7 +10,6 @@ import (
 
 const (
 	loginMethodManual   = "manual"
-	loginMethodCurl     = "curl"
 	loginMethodPassword = "password"
 	loginMethodQRScan   = "qr_scan"
 	loginStatusSuccess  = "success"
@@ -21,8 +20,6 @@ func normalizeLoginMethod(method string) string {
 	switch strings.ToLower(strings.TrimSpace(method)) {
 	case "manual", "cookie", "manual_cookie":
 		return loginMethodManual
-	case "curl", "curl_import":
-		return loginMethodCurl
 	case "password", "password_login":
 		return loginMethodPassword
 	case "qr", "qr_login", "qr_scan":
@@ -80,8 +77,6 @@ func loginTriggerReason(method string) string {
 	switch normalizeLoginMethod(method) {
 	case loginMethodManual:
 		return "手动Cookie录入"
-	case loginMethodCurl:
-		return "curl命令导入"
 	case loginMethodPassword:
 		return "账号密码登录"
 	case loginMethodQRScan:
