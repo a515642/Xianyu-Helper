@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"xianyu-go/internal/auth"
+	"xianyu-go/internal/curlparser"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/engine"
 	"xianyu-go/internal/xianyu/cookierefresh"
@@ -24,6 +25,7 @@ func (s *Server) mountCookies(r chi.Router) {
 	r.Get("/cookies/details", s.listCookieDetails)
 	r.Get("/cookies/runtime-status", s.listCookieRuntimeStatus)
 	r.Post("/cookies", s.addCookie)
+	r.Post("/cookies/import-curl", s.importCookieFromCurl)
 	r.Put("/cookies/{cid}", s.updateCookie)
 	r.Put("/cookies/{cid}/login-info", s.updateCookieLoginInfo)
 	r.Put("/cookies/{cid}/settings", s.updateCookieSettings)
@@ -474,6 +476,59 @@ func (s *Server) refreshCookieProfile(w http.ResponseWriter, r *http.Request) {
 		"avatar_url":    avatarURL,
 		"profile_error": profileErr,
 	})
+}
+
+// importCookieFromCurl 从浏览器复制的 curl 命令中提取 Cookie 并添加账号。
+// 这里只解析命令文本，不会执行 curl 或访问其中的 URL。
+func (s *Server) importCookieFromCurl(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Curl string `json:"curl"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	parsed, err := curlparser.Parse(req.Curl)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sess := auth.SessionFromContext(r.Context())
+	if sess == nil {
+		writeErr(w, http.StatusUnauthorized, "未授权访问")
+		return
+	}
+
+	credentialUnlock := s.Store.LockAccountCredentials(parsed.AccountID)
+	if err := s.Store.Cookies.CreateOwned(r.Context(), parsed.AccountID, parsed.RawCookie, sess.UserID); err != nil {
+		credentialUnlock()
+		switch {
+		case errors.Is(err, db.ErrForbidden):
+			writeErr(w, http.StatusForbidden, "该账号ID已存在且不属于当前用户")
+		case errors.Is(err, db.ErrAlreadyExists):
+			writeErr(w, http.StatusConflict, "该账号ID已存在，请使用重新授权或更新账号功能")
+		default:
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	if s.Store.Tokens != nil {
+		if err := s.Store.Tokens.Clear(r.Context(), parsed.AccountID); err != nil {
+			s.Logger.Warn("curl 导入账号后清理旧连接凭证失败", "cookie_id", parsed.AccountID, "err", err)
+		}
+	}
+	s.markSuccessfulLogin(r.Context(), parsed.AccountID, sess.UserID, loginMethodCurl, "curl 命令导入成功")
+	credentialUnlock()
+
+	if detail, err := s.Store.Cookies.GetDetails(r.Context(), parsed.AccountID); err == nil {
+		s.refreshAccountProfile(r.Context(), detail)
+	}
+	if s.Manager != nil && s.Store.Cookies.GetStatus(r.Context(), parsed.AccountID) {
+		if err := s.Manager.Restart(r.Context(), parsed.AccountID); err != nil {
+			s.Logger.Error("curl 导入账号后启动失败", "cookie_id", parsed.AccountID, "err", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": parsed.AccountID})
 }
 
 // addCookie 添加账号 cookie。
