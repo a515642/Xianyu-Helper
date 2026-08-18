@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertCircle, Check, CheckCheck, ImagePlus, Loader2, MessageCircleMore, RefreshCw,
-  Search, Send, Smile, UserRound, Wifi, WifiOff,
+  Search, Send, Smile, UserRound, Wifi, WifiOff, X,
 } from 'lucide-react';
 import { AccountDetail, ChatMessage, ChatSession } from '../types';
 import {
@@ -9,8 +10,15 @@ import {
   markChatRead, sendChatImage, sendChatMessage,
 } from '../services/api';
 import { emojiURL, renderXianyuText, xianyuEmojis } from '../chatEmojis';
+import { clipboardImageFile, validateChatImage } from '../chatImage';
 
 type SessionsByAccount = Record<string, ChatSession[]>;
+
+type PendingChatImage = {
+  file: File;
+  accountID: string;
+  session: ChatSession;
+};
 
 const accountStorageKey = 'ydisks.chat.account.v1';
 
@@ -61,6 +69,8 @@ const Chat: React.FC = () => {
   const [hasMoreContacts, setHasMoreContacts] = useState<Record<string, boolean>>({});
   const [contactsLoading, setContactsLoading] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [pendingImage, setPendingImage] = useState<PendingChatImage | null>(null);
+  const [pendingImageURL, setPendingImageURL] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [liveState, setLiveState] = useState<'connecting' | 'online' | 'offline'>('connecting');
@@ -75,6 +85,15 @@ const Chat: React.FC = () => {
 
   useEffect(() => { activeAccountRef.current = activeAccountID; }, [activeAccountID]);
   useEffect(() => { activeChatRef.current = activeChatID; }, [activeChatID]);
+  useEffect(() => {
+    if (!pendingImage) {
+      setPendingImageURL('');
+      return;
+    }
+    const url = URL.createObjectURL(pendingImage.file);
+    setPendingImageURL(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pendingImage]);
 
   const reloadSessions = async (accountID: string) => {
     const page = await getChatSessionPage(accountID, undefined, undefined, true);
@@ -374,25 +393,53 @@ const Chat: React.FC = () => {
     }
   };
 
-  const handleImage = async (file?: File) => {
-    if (!file || !selectedSession || !activeAccountID || sending) return;
+  const clearPendingImage = () => {
+    if (sending) return;
+    setPendingImage(null);
+    setError('');
+  };
+
+  const openImagePreview = (file?: File) => {
+    if (!file || !selectedSession || !activeAccountID || sending || activeAccount?.runtime_state !== 'online') return;
+    if (imageInputRef.current) imageInputRef.current.value = '';
+    const validationError = validateChatImage(file);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setError('');
+    setPendingImage({ file, accountID: activeAccountID, session: { ...selectedSession } });
+  };
+
+  const confirmImageSend = async () => {
+    if (!pendingImage || sending) return;
     setSending(true);
     setError('');
     try {
+      const { file, accountID, session } = pendingImage;
       const result = await sendChatImage({
-        account_id: activeAccountID, chat_id: selectedSession.chat_id, buyer_id: selectedSession.buyer_id,
-        buyer_name: selectedSession.buyer_name, buyer_avatar_url: selectedSession.buyer_avatar_url,
-        item_id: selectedSession.item_id, item_title: selectedSession.item_title, image: file,
+        account_id: accountID, chat_id: session.chat_id, buyer_id: session.buyer_id,
+        buyer_name: session.buyer_name, buyer_avatar_url: session.buyer_avatar_url,
+        item_id: session.item_id, item_title: session.item_title, image: file,
       });
-      setMessages(current => current.some(item => item.message_key === result.message.message_key)
-        ? current.map(item => item.message_key === result.message.message_key ? result.message : item)
-        : [...current, result.message]);
+      if (accountID === activeAccountRef.current && session.chat_id === activeChatRef.current) {
+        setMessages(current => current.some(item => item.message_key === result.message.message_key)
+          ? current.map(item => item.message_key === result.message.message_key ? result.message : item)
+          : [...current, result.message]);
+      }
+      setPendingImage(null);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : '图片发送失败');
     } finally {
       setSending(false);
-      if (imageInputRef.current) imageInputRef.current.value = '';
     }
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const file = clipboardImageFile(event.clipboardData);
+    if (!file) return;
+    event.preventDefault();
+    openImagePreview(file);
   };
 
   if (loading) return <div className="flex h-[calc(100vh-4rem)] items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-sky-500" /></div>;
@@ -556,12 +603,13 @@ const Chat: React.FC = () => {
                         </div>
                       </div>}
                     </div>
-                    <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={event => void handleImage(event.target.files?.[0])} />
+                    <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={event => openImagePreview(event.target.files?.[0])} />
                     <button type="button" onClick={() => imageInputRef.current?.click()} disabled={sending || activeAccount?.runtime_state !== 'online'}
                       className="rounded-lg p-2 text-slate-500 transition hover:bg-sky-50 hover:text-sky-600 disabled:opacity-40" title="发送图片（最大 10MB）"><ImagePlus className="h-5 w-5" /></button>
                   </div>
                   <div className="flex items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-2 transition focus-within:border-sky-400 focus-within:ring-2 focus-within:ring-sky-100">
                     <textarea value={draft} onChange={event => setDraft(event.target.value)} rows={2} maxLength={2000}
+                      onPaste={handlePaste}
                       onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void handleSend(); } }}
                       disabled={activeAccount?.runtime_state !== 'online'} placeholder={activeAccount?.runtime_state === 'online' ? '输入消息，Enter 发送，Shift + Enter 换行' : '账号离线，暂时无法发送'}
                       className="max-h-32 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 outline-none disabled:cursor-not-allowed" />
@@ -581,6 +629,44 @@ const Chat: React.FC = () => {
             )}
           </main>
         </div>
+      )}
+      {pendingImage && createPortal(
+        <div className="modal-overlay-centered" role="dialog" aria-modal="true" aria-labelledby="chat-image-preview-title">
+          <div className="modal-container relative" style={{ maxWidth: '42rem' }}>
+            <button type="button" onClick={clearPendingImage} disabled={sending}
+              className="absolute right-4 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 disabled:opacity-40"
+              aria-label="关闭图片预览">
+              <X className="h-5 w-5" />
+            </button>
+            <div className="modal-header">
+              <div>
+                <h3 id="chat-image-preview-title" className="text-xl font-black text-slate-950">发送图片</h3>
+                <p className="mt-1 text-sm text-slate-500">请确认图片无误后再发送，避免误操作。</p>
+              </div>
+            </div>
+            <div className="modal-body space-y-4">
+              <div className="flex min-h-64 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                {pendingImageURL ? <img src={pendingImageURL} alt="待发送图片预览" className="max-h-[60vh] max-w-full rounded-xl object-contain" />
+                  : <Loader2 className="h-7 w-7 animate-spin text-sky-500" />}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                <span className="max-w-full truncate font-medium">{pendingImage.file.name || '剪贴板图片'}</span>
+                <span>{(pendingImage.file.size / 1024).toFixed(1)} KB</span>
+              </div>
+              {error && <p className="rounded-xl bg-red-50 px-4 py-3 text-sm font-bold text-red-700">{error}</p>}
+            </div>
+            <div className="modal-footer">
+              <button type="button" onClick={clearPendingImage} disabled={sending}
+                className="rounded-xl bg-slate-100 px-5 py-3 font-bold text-slate-700 transition hover:bg-slate-200 disabled:opacity-40">取消</button>
+              <button type="button" onClick={() => void confirmImageSend()} disabled={sending || !pendingImageURL}
+                className="ios-btn-primary flex items-center gap-2 rounded-xl px-5 py-3 font-bold disabled:opacity-50">
+                {sending && <Loader2 className="h-4 w-4 animate-spin" />}
+                {sending ? '发送中...' : '确认发送'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </section>
   );
