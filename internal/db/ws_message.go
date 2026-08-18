@@ -1,0 +1,65 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"time"
+)
+
+// WSMessage 原始 WS 收包记录。
+type WSMessage struct {
+	CookieID    string
+	Direction   string
+	RawText     string
+	ParsedJSON  string
+	MessageKind string
+	ParseStatus string
+	Error       string
+}
+
+// WSMessageStore 保存 WS 消息。
+type WSMessageStore struct{ DB *sql.DB }
+
+// Add 记录一条 WS 消息。
+func (w *WSMessageStore) Add(ctx context.Context, m WSMessage) error {
+	return w.AddBatch(ctx, []WSMessage{m})
+}
+
+// AddBatch 在一次数据库操作中记录多条 WS 消息。
+func (w *WSMessageStore) AddBatch(ctx context.Context, messages []WSMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	var query strings.Builder
+	query.WriteString("INSERT INTO ws_messages (cookie_id, direction, raw_text, parsed_json, message_kind, parse_status, error, created_at) VALUES ")
+	args := make([]any, 0, len(messages)*7)
+	for i, message := range messages {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString("(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)")
+		if message.Direction == "" {
+			message.Direction = "in"
+		}
+		if message.ParseStatus == "" {
+			message.ParseStatus = "raw"
+		}
+		args = append(args, message.CookieID, message.Direction, message.RawText, message.ParsedJSON,
+			message.MessageKind, message.ParseStatus, message.Error)
+	}
+
+	_, err := w.DB.ExecContext(ctx, query.String(), args...)
+	return err
+}
+
+// DeleteBefore 删除指定账号在 cutoff 之前的 WS 诊断消息。
+func (w *WSMessageStore) DeleteBefore(ctx context.Context, cookieID string, cutoff time.Time) (int64, error) {
+	result, err := w.DB.ExecContext(ctx,
+		"DELETE FROM ws_messages WHERE cookie_id=? AND created_at < ?", cookieID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
