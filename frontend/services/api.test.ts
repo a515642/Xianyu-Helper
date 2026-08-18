@@ -38,6 +38,7 @@ import {
 	getChatSessions,
 	getChatMessages,
 	sendChatMessage,
+	sendChatImage,
 	markChatRead,
 	updateAccountTaskSettings,
 	runAccountTask,
@@ -66,11 +67,18 @@ test('chat APIs preserve account and conversation scope', async () => {
 	await getChatSessions('a1');
 	await getChatMessages('a1', 'c1', 9);
 	await sendChatMessage({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1', text: 'hi' });
+	const image = new File(['png'], 'paste.png', { type: 'image/png' });
+	await sendChatImage({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1', image });
 	await markChatRead('a1', 'c1');
 	expect(fetchMock.mock.calls[0][0]).toBe('/api/chat/sessions?account_id=a1');
 	expect(fetchMock.mock.calls[1][0]).toBe('/api/chat/messages?account_id=a1&chat_id=c1&before_id=9');
 	expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1' });
-	expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({ account_id: 'a1', chat_id: 'c1', message_ids: [] });
+	expect(fetchMock.mock.calls[3][0]).toBe('/api/chat/images');
+	expect(fetchMock.mock.calls[3][1].body).toBeInstanceOf(FormData);
+	expect((fetchMock.mock.calls[3][1].body as FormData).get('image')).toBe(image);
+	expect((fetchMock.mock.calls[3][1].body as FormData).get('account_id')).toBe('a1');
+	expect(fetchMock.mock.calls[4][0]).toBe('/api/chat/read');
+	expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ account_id: 'a1', chat_id: 'c1', message_ids: [] });
 });
 
 test('account task APIs keep rating and polish account-scoped', async () => {

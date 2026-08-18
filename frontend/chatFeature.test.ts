@@ -35,6 +35,14 @@ describe('online chat UI contract', () => {
 		expect(chat).toContain("message.message_type === 'image'");
 		expect(chat).toContain("message.message_type === 'video'");
 		expect(chat).toContain('sendChatImage');
+		expect(chat).toContain('onPaste={handlePaste}');
+		expect(chat).toContain('clipboardImageFile');
+		expect(chat).toContain('openImagePreview');
+		expect(chat).toContain('confirmImageSend');
+		expect(chat).toContain('待发送图片预览');
+		expect(chat).toContain('确认发送');
+		expect(chat).toContain('URL.createObjectURL');
+		expect(chat).toContain('URL.revokeObjectURL');
 	});
 
 	test('renders official notices as neutral system messages', () => {
