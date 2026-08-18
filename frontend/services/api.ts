@@ -51,6 +51,10 @@ export const addAccount = async (id: string, value: string, loginMethod?: string
   return post('/cookies', { id, value, login_method: loginMethod });
 };
 
+export const importAccountFromCurl = async (curlCommand: string): Promise<ApiResponse & { id?: string }> => {
+  return post('/cookies/import-curl', { curl: curlCommand });
+};
+
 const accountAvatarURL = (item: any, version: string): string => {
   const raw = item.avatar_url || '';
   if (!raw) return '';
