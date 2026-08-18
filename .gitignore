@@ -18,6 +18,7 @@
 # Runtime data
 /data/
 /browser_data/
+/.docker/
 *.db
 *.db-shm
 *.db-wal
@@ -47,3 +48,4 @@
 .DS_Store
 .idea/
 .vscode/
+.docker
