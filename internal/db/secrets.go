@@ -117,6 +117,38 @@ func (s *Store) EncryptLegacySecrets(ctx context.Context) error {
 		}
 	}
 
+	type profileSecret struct {
+		id     int64
+		apiKey string
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT id,COALESCE(api_key,'') FROM ai_profiles`)
+	if err != nil {
+		return err
+	}
+	var profiles []profileSecret
+	for rows.Next() {
+		var row profileSecret
+		if err := rows.Scan(&row.id, &row.apiKey); err != nil {
+			rows.Close()
+			return err
+		}
+		profiles = append(profiles, row)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range profiles {
+		encrypted, err := codec.encrypt("ai-profile-api-key", fmt.Sprint(row.id), row.apiKey)
+		if err != nil {
+			return fmt.Errorf("校验 AI profile %d API Key: %w", row.id, err)
+		}
+		if encrypted != row.apiKey {
+			if _, err := tx.ExecContext(ctx, `UPDATE ai_profiles SET api_key=? WHERE id=?`, encrypted, row.id); err != nil {
+				return err
+			}
+		}
+	}
+
 	type tokenSecret struct{ cookieID, deviceID, accessToken string }
 	rows, err = tx.QueryContext(ctx, `SELECT cookie_id,device_id,access_token FROM account_tokens`)
 	if err != nil {

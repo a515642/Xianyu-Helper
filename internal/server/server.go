@@ -202,6 +202,7 @@ func (s *Server) Router() http.Handler {
 		s.mountSettingsReal(r)
 		// AI 设置
 		s.mountAIReplyReal(r)
+		s.mountAIProfiles(r)
 		// 用户
 		s.mountUserReal(r)
 
@@ -209,6 +210,7 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireAdmin)
 			s.mountAdminReal(r)
+			s.mountAIForbiddenWords(r)
 		})
 	})
 

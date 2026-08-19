@@ -66,6 +66,49 @@ export interface AccountDetail {
 	last_polish_at?: number;
 }
 
+export interface AIProfile {
+  id: number;
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  use_system_api: boolean;
+  has_api_key: boolean;
+  base_url: string;
+  model_name: string;
+  custom_prompts: string;
+  thinking_mode: 'enabled' | 'disabled';
+  trigger_mode: 'all_text';
+  max_discount_percent: number;
+  max_discount_amount: number;
+  max_bargain_rounds: number;
+  item_ids: string[];
+}
+
+export interface AIForbiddenWord {
+  id?: number;
+  keyword: string;
+  replacement: string;
+  enabled: boolean;
+  sort_order?: number;
+}
+
+export interface AIProfileInput {
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  use_system_api: boolean;
+  api_key?: string;
+  clear_api_key?: boolean;
+  base_url: string;
+  model_name: string;
+  custom_prompts: string;
+  thinking_mode: 'enabled' | 'disabled';
+  max_discount_percent: number;
+  max_discount_amount: number;
+  max_bargain_rounds: number;
+  item_ids: string[];
+}
+
 export interface AccountTaskSettings {
 	account_id: string;
 	auto_rate_enabled: boolean;
@@ -292,6 +335,7 @@ export interface SystemSettings {
   ai_api_key?: string;
   ai_api_url?: string;
   ai_base_url?: string;
+  ai_thinking_mode?: 'enabled' | 'disabled' | string;
   default_reply?: string;
   registration_enabled?: boolean;
   smtp_server?: string;

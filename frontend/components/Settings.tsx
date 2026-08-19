@@ -377,6 +377,8 @@ const Settings: React.FC = () => {
                 )}
               </div>
 
+              <label className="flex items-center gap-3 font-bold text-sm text-gray-800"><input type="checkbox" checked={(settings.ai_thinking_mode || 'disabled') === 'enabled'} onChange={e => setSettings({...settings, ai_thinking_mode: e.target.checked ? 'enabled' : 'disabled'})} />启用思考模式 <span className="text-xs font-normal text-gray-500">可能增加响应时间和 Token 消耗</span></label>
+
               <div className="p-3 bg-blue-50 rounded-xl text-xs text-blue-700">
                 <strong>常见 AI 服务:</strong>
                 <ul className="list-disc list-inside mt-1 space-y-0.5">
