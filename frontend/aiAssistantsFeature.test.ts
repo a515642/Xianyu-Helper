@@ -27,5 +27,7 @@ describe('product scoped AI assistants', () => {
     expect(page).toContain('{{item_title}}');
     expect(page).toContain('modal-header flex items-center justify-between');
     expect(page).toContain('flex w-full justify-end gap-3');
+    expect(page).toContain('role="switch"');
+    expect(page).toContain('aria-checked={profile.enabled}');
   });
 });

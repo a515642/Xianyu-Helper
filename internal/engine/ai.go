@@ -134,35 +134,46 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if reply == "" {
 		return nil, nil
 	}
+	silentExit := strings.Contains(reply, "<exit>")
 	minimumPrice := minimumAllowedPrice(itemPrice, profile.MaxDiscountPercent, profile.MaxDiscountAmount, withinBargainLimit)
-	if offered, unsafe := unsafeOfferedPrice(reply, minimumPrice); unsafe {
-		a.logger.Warn("AI 报价超过折扣边界，使用安全回复", "offered", offered, "minimum", minimumPrice)
-		if minimumPrice >= itemPrice || !withinBargainLimit {
-			reply = "抱歉，当前价格已经是最低价，暂时不能再优惠了。"
-		} else {
-			reply = fmt.Sprintf("可以优惠的最低价格是 %.2f 元，低于这个价格暂时无法成交。", minimumPrice)
+	if !silentExit {
+		if offered, unsafe := unsafeOfferedPrice(reply, minimumPrice); unsafe {
+			a.logger.Warn("AI 报价超过折扣边界，使用安全回复", "offered", offered, "minimum", minimumPrice)
+			if minimumPrice >= itemPrice || !withinBargainLimit {
+				reply = "抱歉，当前价格已经是最低价，暂时不能再优惠了。"
+			} else {
+				reply = fmt.Sprintf("可以优惠的最低价格是 %.2f 元，低于这个价格暂时无法成交。", minimumPrice)
+			}
 		}
-	}
-	reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
-	if err != nil {
-		return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
-	}
-	reply = strings.TrimSpace(reply)
-	if reply == "" {
-		a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
-		return nil, nil
+		reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
+		if err != nil {
+			return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
+		}
+		reply = strings.TrimSpace(reply)
+		if reply == "" {
+			a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
+			return nil, nil
+		}
 	}
 	if m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
 		if isBargain {
 			intent = "bargain"
 		}
+		assistantIntent := "reply"
+		if silentExit {
+			assistantIntent = "silent_exit"
+		}
 		if err := a.store.AIReply.AddProfileConversationExchange(ctx, profile.ID, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
 			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: intent, BargainCount: bargainCount},
-			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply", BargainCount: bargainCount},
+			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: assistantIntent, BargainCount: bargainCount},
 		); err != nil {
 			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
 		}
+	}
+	if silentExit {
+		a.logger.Info("AI 选择静默处理消息", "profile", profile.ID, "chat", m.ChatID)
+		return &ReplyResult{Skip: true}, nil
 	}
 	return &ReplyResult{Text: reply}, nil
 }

@@ -237,6 +237,28 @@ func TestAIReply_NonBargainBoundItemAndForbiddenWords(t *testing.T) {
 	}
 }
 
+func TestAIReplyExitPersistsContextWithoutSending(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv := mockOpenAIServer(t, 0, "无需回复 <exit>")
+	profileID := enableTestAI(t, s, srv.URL, "silent-ai")
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("谢谢", "item1", "chat-silent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || !res.Skip || res.Text != "" {
+		t.Fatalf("silent result=%+v", res)
+	}
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-silent", "item1", 10)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	if history[1].Content != "无需回复 <exit>" || history[1].Intent != "silent_exit" {
+		t.Fatalf("assistant history=%+v", history[1])
+	}
+}
+
 func TestAIReply_UnboundItemFallsThrough(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()
