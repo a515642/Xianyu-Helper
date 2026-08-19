@@ -872,13 +872,6 @@ const AccountList: React.FC = () => {
                     <Edit2 className="w-5 h-5" />
                 </button>
                 <button
-                    onClick={() => openAIModal(account)}
-                    className="p-3 rounded-xl hover:bg-purple-100 transition-colors text-purple-600"
-                    title="AI设置"
-                >
-                    <Bot className="w-5 h-5" />
-                </button>
-                <button
                     onClick={() => setTaskAccount(account)}
                     className="p-3 rounded-xl hover:bg-amber-100 transition-colors text-amber-600"
                     title="自动评价与每日擦亮"
@@ -1157,14 +1150,16 @@ const AccountList: React.FC = () => {
       {activeModal === 'edit' && editingAccount && createPortal(
         <div className="modal-overlay-centered">
           <div className="modal-container" style={{maxWidth: '600px'}}>
-            <div className="modal-header">
-              <div>
+            <div className="modal-header flex items-center justify-between gap-4">
+              <div className="min-w-0">
                 <h3 className="text-2xl font-extrabold text-gray-900">编辑账号</h3>
                 <p className="text-sm text-gray-500 mt-1">{editingAccount.nickname || editingAccount.remark || editingAccount.id}</p>
               </div>
               <button
 				onClick={() => void closeEditModal()}
-                className="p-2 rounded-xl hover:bg-gray-100 transition-colors flex-shrink-0"
+                type="button"
+                aria-label="关闭弹窗"
+                className="shrink-0 rounded-xl p-2 hover:bg-gray-100 transition-colors"
               >
                 <X className="w-5 h-5 text-gray-500" />
               </button>
@@ -1455,8 +1450,8 @@ const AccountList: React.FC = () => {
       {activeModal === 'ai-settings' && editingAccount && createPortal(
         <div className="modal-overlay-centered">
           <div className="modal-container" style={{maxWidth: '600px'}}>
-            <div className="modal-header">
-              <div>
+            <div className="modal-header flex items-center justify-between gap-4">
+              <div className="min-w-0">
                 <h3 className="text-2xl font-extrabold text-gray-900 flex items-center gap-2">
                   <Bot className="w-6 h-6 text-purple-500" />
                   AI助手设置
@@ -1465,7 +1460,9 @@ const AccountList: React.FC = () => {
               </div>
               <button
 				onClick={closeAIModal}
-                className="p-2 rounded-xl hover:bg-gray-100 transition-colors flex-shrink-0"
+                type="button"
+                aria-label="关闭弹窗"
+                className="shrink-0 rounded-xl p-2 hover:bg-gray-100 transition-colors"
               >
                 <X className="w-5 h-5 text-gray-500" />
               </button>

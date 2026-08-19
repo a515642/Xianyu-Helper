@@ -20,6 +20,7 @@ type Store struct {
 	DefaultReps    *DefaultReplies
 	ItemReps       *ItemReplies
 	AIReply        *AIReply
+	AIProfiles     *AIProfiles
 	Notifications  *Notifications
 	Settings       *SystemSettings
 	WSMessages     *WSMessageStore
@@ -52,6 +53,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		DefaultReps:     &DefaultReplies{DB: db, Dialect: dialect},
 		ItemReps:        &ItemReplies{DB: db, Dialect: dialect},
 		AIReply:         &AIReply{DB: db, codec: codec},
+		AIProfiles:      &AIProfiles{DB: db, Dialect: dialect, codec: codec},
 		Notifications:   &Notifications{DB: db, Dialect: dialect, codec: codec},
 		Settings:        &SystemSettings{DB: db, Dialect: dialect, codec: codec},
 		WSMessages:      &WSMessageStore{DB: db},

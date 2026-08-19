@@ -3,8 +3,8 @@ import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType,
-  NotificationChannel, NotificationEventType
-	, AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
+  NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
+  AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
 
@@ -45,6 +45,15 @@ export const updateLoginCredentials = async (data: {
 }): Promise<ApiResponse & { requires_relogin?: boolean }> => {
   return put('/account/credentials', data);
 };
+
+// Product-scoped AI assistants
+export const getAIProfiles = async (cookieId: string): Promise<AIProfile[]> => get('/ai-profiles', { cookie_id: cookieId });
+export const createAIProfile = async (input: AIProfileInput): Promise<AIProfile> => post('/ai-profiles', input);
+export const updateAIProfile = async (id: number, input: Partial<AIProfileInput>): Promise<AIProfile> => put(`/ai-profiles/${id}`, input);
+export const deleteAIProfile = async (id: number): Promise<ApiResponse> => del(`/ai-profiles/${id}`);
+export const replaceAIProfileItems = async (id: number, itemIds: string[]): Promise<ApiResponse> => put(`/ai-profiles/${id}/items`, { item_ids: itemIds });
+export const getAIForbiddenWords = async (): Promise<AIForbiddenWord[]> => get('/ai-forbidden-words');
+export const replaceAIForbiddenWords = async (rules: AIForbiddenWord[]): Promise<ApiResponse> => put('/ai-forbidden-words', { rules });
 
 // Accounts
 export const addAccount = async (id: string, value: string, loginMethod?: string): Promise<ApiResponse> => {

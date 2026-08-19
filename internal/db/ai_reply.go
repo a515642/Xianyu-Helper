@@ -67,14 +67,18 @@ func (a *AIReply) Get(ctx context.Context, cookieID string) (*AIReplySettings, e
 
 // ConversationHistory 返回最近的会话消息，结果按时间正序排列。
 func (a *AIReply) ConversationHistory(ctx context.Context, cookieID, chatID, itemID string, limit int) ([]AIConversationMessage, error) {
+	return a.ProfileConversationHistory(ctx, 0, cookieID, chatID, itemID, limit)
+}
+
+func (a *AIReply) ProfileConversationHistory(ctx context.Context, profileID int64, cookieID, chatID, itemID string, limit int) ([]AIConversationMessage, error) {
 	if limit <= 0 || limit > 20 {
 		limit = 10
 	}
 	rows, err := a.DB.QueryContext(ctx, `
 		SELECT role, content, COALESCE(intent,''), COALESCE(bargain_count,0)
 		  FROM ai_conversations
-		 WHERE cookie_id=? AND chat_id=? AND item_id=?
-		 ORDER BY id DESC LIMIT ?`, cookieID, chatID, itemID, limit)
+		 WHERE ai_profile_id=? AND cookie_id=? AND chat_id=? AND item_id=?
+		 ORDER BY id DESC LIMIT ?`, profileID, cookieID, chatID, itemID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +103,14 @@ func (a *AIReply) ConversationHistory(ctx context.Context, cookieID, chatID, ite
 
 // CurrentBargainCount 返回会话目前的砍价轮次。
 func (a *AIReply) CurrentBargainCount(ctx context.Context, cookieID, chatID, itemID string) (int, error) {
+	return a.ProfileBargainCount(ctx, 0, cookieID, chatID, itemID)
+}
+
+func (a *AIReply) ProfileBargainCount(ctx context.Context, profileID int64, cookieID, chatID, itemID string) (int, error) {
 	var count int
 	err := a.DB.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(bargain_count),0) FROM ai_conversations
-		 WHERE cookie_id=? AND chat_id=? AND item_id=?`, cookieID, chatID, itemID).Scan(&count)
+		 WHERE ai_profile_id=? AND cookie_id=? AND chat_id=? AND item_id=?`, profileID, cookieID, chatID, itemID).Scan(&count)
 	return count, err
 }
 
@@ -117,16 +125,20 @@ func (a *AIReply) AddConversation(ctx context.Context, cookieID, chatID, userID,
 // AddConversationExchange 原子保存一轮用户消息与 AI 回复，避免上游调用失败时
 // 留下半轮历史并错误消耗砍价轮次。
 func (a *AIReply) AddConversationExchange(ctx context.Context, cookieID, chatID, userID, itemID string, userMessage, assistantMessage AIConversationMessage) error {
+	return a.AddProfileConversationExchange(ctx, 0, cookieID, chatID, userID, itemID, userMessage, assistantMessage)
+}
+
+func (a *AIReply) AddProfileConversationExchange(ctx context.Context, profileID int64, cookieID, chatID, userID, itemID string, userMessage, assistantMessage AIConversationMessage) error {
 	tx, err := a.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	query := `INSERT INTO ai_conversations
-		(cookie_id,chat_id,user_id,item_id,role,content,intent,bargain_count)
-		VALUES (?,?,?,?,?,?,?,?)`
+		(ai_profile_id,cookie_id,chat_id,user_id,item_id,role,content,intent,bargain_count)
+		VALUES (?,?,?,?,?,?,?,?,?)`
 	for _, message := range []AIConversationMessage{userMessage, assistantMessage} {
-		if _, err := tx.ExecContext(ctx, query, cookieID, chatID, userID, itemID, message.Role, message.Content, message.Intent, message.BargainCount); err != nil {
+		if _, err := tx.ExecContext(ctx, query, profileID, cookieID, chatID, userID, itemID, message.Role, message.Content, message.Intent, message.BargainCount); err != nil {
 			return err
 		}
 	}
