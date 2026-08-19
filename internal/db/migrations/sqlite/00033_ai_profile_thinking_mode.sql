@@ -1,0 +1,11 @@
+-- +goose Up
+-- +goose StatementBegin
+-- This migration is intentionally a no-op for SQLite. The released 00031
+-- schema already contains thinking_mode; it remains for migration numbering
+-- compatibility with databases that reached the intermediate release.
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- no-op
+-- +goose StatementEnd
