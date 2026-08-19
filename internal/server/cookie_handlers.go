@@ -216,7 +216,8 @@ func scopedCookieHeader(detail *db.CookieDetail, requestURL string) string {
 }
 
 type updateCookieSettingsRequest struct {
-	Cookie        *string  `json:"cookie"`
+	Curl          *string  `json:"curl"`
+	Cookie        *string  `json:"cookie"` // 兼容旧客户端的原始 Cookie
 	Remark        *string  `json:"remark"`
 	AutoConfirm   *bool    `json:"auto_confirm"`
 	PauseDuration *int     `json:"pause_duration"`
@@ -239,7 +240,11 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if req.Cookie != nil && strings.TrimSpace(*req.Cookie) == "" {
+	if req.Curl != nil && strings.TrimSpace(*req.Curl) == "" {
+		writeErr(w, http.StatusBadRequest, "curl 命令不能为空")
+		return
+	}
+	if req.Curl == nil && req.Cookie != nil && strings.TrimSpace(*req.Cookie) == "" {
 		writeErr(w, http.StatusBadRequest, "Cookie 不能为空")
 		return
 	}
@@ -264,6 +269,19 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail = latestDetail
+	expectedAccountID := currentCredentialAccountID(cid, detail.Value)
+	var canonicalCookie *string
+	if req.Curl != nil {
+		canonicalCookie, err = canonicalCurlInput(expectedAccountID, req.Curl)
+	} else {
+		canonicalCookie, err = canonicalLegacyCookieInput(expectedAccountID, req.Cookie)
+	}
+	if err != nil {
+		credentialUnlock()
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Cookie = canonicalCookie
 
 	input := db.AccountSettingsUpdate{
 		UserID:        detail.UserID,
@@ -307,7 +325,7 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if req.Cookie != nil {
+	if canonicalCookie != nil {
 		// UpdateSettings 已在同一事务中写入 Cookie 并清除旧快照，不能再做
 		// 第二次非原子覆盖。
 		if s.Store.Tokens != nil {

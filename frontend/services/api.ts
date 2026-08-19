@@ -215,7 +215,8 @@ export const updateAccountCookie = async (id: string, value: string, loginMethod
 };
 
 export interface AccountSettingsUpdate {
-  cookie?: string;
+  curl?: string;
+  cookie?: string; // legacy raw Cookie compatibility
   remark?: string;
   auto_confirm?: boolean;
   pause_duration?: number;
