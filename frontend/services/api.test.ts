@@ -355,12 +355,14 @@ test('account editor settings use one aggregate request', async () => {
 	const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true }));
 	vi.stubGlobal('fetch', fetchMock);
 	await updateAccountSettings('acc1', {
+	  curl: 'curl.exe "https://example.com" -H "Cookie: unb=acc1; _m_h5_tk=token_1"',
 	  remark: 'main', auto_confirm: false, pause_duration: 5,
 	  username: 'user', show_browser: true, channel_ids: [1, 2],
 	});
 	expect(fetchMock).toHaveBeenCalledTimes(1);
 	expect(fetchMock).toHaveBeenCalledWith('/cookies/acc1/settings', expect.objectContaining({ method: 'PUT' }));
 	expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+	  curl: 'curl.exe "https://example.com" -H "Cookie: unb=acc1; _m_h5_tk=token_1"',
 	  remark: 'main', auto_confirm: false, pause_duration: 5,
 	  username: 'user', show_browser: true, channel_ids: [1, 2],
 	});

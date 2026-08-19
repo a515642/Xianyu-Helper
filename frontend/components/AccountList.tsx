@@ -388,7 +388,7 @@ const AccountList: React.FC = () => {
       auto_confirm: account.auto_confirm || false,
       pause_duration: account.pause_duration || 0,
       username: account.username || '',
-      login_password: account.login_password || '',
+      login_password: '',
       show_browser: account.show_browser || false,
       showLoginPassword: false,
       clear_password: false,
@@ -455,9 +455,9 @@ const AccountList: React.FC = () => {
 		payload.remark = editForm.remark;
       }
 
-      // 更新Cookie
-      if (editForm.cookie && editForm.cookie !== (editingAccount.cookie || editingAccount.value || '')) {
-		payload.cookie = editForm.cookie;
+      // 使用 curl 更新 Cookie；留空表示不修改当前凭证。
+      if (editForm.cookie.trim()) {
+		payload.curl = editForm.cookie;
       }
 
       // 更新自动确认
@@ -1194,16 +1194,16 @@ const AccountList: React.FC = () => {
                 />
               </div>
 
-              {/* Cookie */}
+              {/* curl 命令 */}
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">Cookie</label>
+                <label className="block text-sm font-bold text-gray-700 mb-2">curl 命令</label>
                 <textarea
                   value={editForm.cookie}
                   onChange={(e) => setEditForm({ ...editForm, cookie: e.target.value })}
-                  placeholder="更新账号Cookie"
+                  placeholder={'粘贴浏览器开发者工具复制的 curl 命令，例如：\ncurl.exe "https://..." -H "Cookie: unb=...; _m_h5_tk=..."'}
                   className="w-full ios-input px-4 py-3 rounded-xl h-32 resize-none font-mono text-xs"
                 />
-                <p className="text-xs text-gray-500 mt-1">当前Cookie长度: {editForm.cookie.length} 字符</p>
+                <p className="text-xs text-gray-500 mt-1">已输入 curl 命令长度: {editForm.cookie.length} 字符；留空表示不修改当前凭证</p>
               </div>
 
               {/* 自动确认发货 */}
