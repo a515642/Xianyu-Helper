@@ -77,6 +77,7 @@ type ClientImpl struct {
 	PolishItemURL       string
 	PolishItemBackupURL string
 	ChatUserQueryURL    string
+	AdjustPriceURL      string
 }
 
 // httpClient 返回带统一请求/响应日志的 HTTP 客户端副本。统一放在传输层，
