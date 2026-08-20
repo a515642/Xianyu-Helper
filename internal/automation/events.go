@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	TriggerOrderCreated         = "order_created"
 	TriggerOrderPaid            = "order_paid"
 	TriggerBuyerReviewed        = "buyer_reviewed"
 	TriggerReviewMissingTimeout = "review_missing_timeout"
@@ -83,6 +84,8 @@ func ExtractTaskFromWS(accountID, cookieStr string, raw map[string]any) *Task {
 		Raw:       raw,
 	}
 	switch {
+	case isOrderCreatedEvent(f):
+		task.TriggerType = TriggerOrderCreated
 	case isOrderPaidEvent(f):
 		task.TriggerType = TriggerOrderPaid
 	case isBuyerReviewedEvent(f):
@@ -182,6 +185,13 @@ func fieldsFromRaw(raw map[string]any) rawFields {
 		}
 	}
 	return f
+}
+
+func isOrderCreatedEvent(f rawFields) bool {
+	if f.orderRole == "buyer" || strings.TrimSpace(f.orderID) == "" {
+		return false
+	}
+	return strings.Contains(f.text, "我已拍下，待付款") || strings.Contains(f.text, "买家已拍下，待付款") || strings.Contains(f.redReminder, "待付款")
 }
 
 func isOrderPaidEvent(f rawFields) bool {

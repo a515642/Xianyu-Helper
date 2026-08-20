@@ -77,6 +77,7 @@ export interface AIProfile {
   model_name: string;
   custom_prompts: string;
   thinking_mode: 'enabled' | 'disabled';
+  bargain_strategy_enabled: boolean;
   trigger_mode: 'all_text';
   max_discount_percent: number;
   max_discount_amount: number;
@@ -103,6 +104,7 @@ export interface AIProfileInput {
   model_name: string;
   custom_prompts: string;
   thinking_mode: 'enabled' | 'disabled';
+  bargain_strategy_enabled: boolean;
   max_discount_percent: number;
   max_discount_amount: number;
   max_bargain_rounds: number;

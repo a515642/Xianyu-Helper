@@ -361,12 +361,26 @@ func New(cfg Config) *Account {
 		credentialFP:     credentialStateFingerprint(cfg.CookieStr, ""),
 	}
 	if cfg.Store != nil {
-		a.reply = NewReplyService(cfg.CookieID, cfg.Store, a, nil, NewAIReplier(cfg.CookieID, cfg.Store, logger), logger)
+		ai := NewAIReplier(cfg.CookieID, cfg.Store, logger)
+		if adjuster, ok := mtopClient.(interface {
+			AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
+		}); ok {
+			ai.SetOrderPriceAdjuster(adjuster)
+		}
+		a.reply = NewReplyService(cfg.CookieID, cfg.Store, a, nil, ai, logger)
 		if cfg.Store.WSMessages != nil {
 			a.wsRecordQueue = make(chan db.WSMessage, 256)
 		}
 	}
 	return a
+}
+
+// InjectAIMessage submits an internally generated user-context message to the reply chain.
+func (a *Account) InjectAIMessage(ctx context.Context, m ChatMessage) error {
+	if a.reply == nil {
+		return nil
+	}
+	return a.reply.Handle(ctx, m)
 }
 
 // Run 阻塞运行账号主循环，直到 ctx 取消或不可恢复错误。

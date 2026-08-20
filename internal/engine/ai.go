@@ -19,6 +19,7 @@ import (
 
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/netguard"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 const (
@@ -32,12 +33,21 @@ var newAIHTTPClient = func(baseURL string) (*http.Client, error) {
 
 // AIReplierImpl AI 回复实现。
 type AIReplierImpl struct {
-	cookieID string
-	store    *db.Store
-	logger   *slog.Logger
+	cookieID           string
+	store              *db.Store
+	logger             *slog.Logger
+	orderPriceAdjuster interface {
+		AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
+	}
 }
 
 // NewAIReplier 构造。
+func (a *AIReplierImpl) SetOrderPriceAdjuster(adjuster interface {
+	AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
+}) {
+	a.orderPriceAdjuster = adjuster
+}
+
 func NewAIReplier(cookieID string, store *db.Store, logger *slog.Logger) *AIReplierImpl {
 	if logger == nil {
 		logger = slog.Default()
@@ -77,27 +87,27 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 
 	// 取商品信息和当前会话状态构造 system prompt。
 	itemTitle, itemPrice, itemDesc := a.itemInfo(ctx, m.ItemID)
-	history, bargainCount, isBargain, err := a.conversationContext(ctx, profile.ID, m)
+	history, bargainCount, _, err := a.conversationContext(ctx, profile.ID, m)
 	if err != nil {
 		return nil, fmt.Errorf("读取 AI 对话历史失败: %w", err)
 	}
-	if isBargain {
-		bargainCount++
+	withinBargainLimit := true
+	if profile.BargainStrategyEnabled {
+		systemPrompt := buildSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
+		systemPrompt += "\n请自行判断买家是否在议价；只有确实需要议价时才考虑后续改价工具。"
+		return a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
 	}
-	withinBargainLimit := !isBargain || bargainCount <= profile.MaxBargainRounds
-	systemPrompt := buildSystemPrompt(
-		profile.CustomPrompts, itemTitle, itemPrice, itemDesc,
-		profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount,
-	)
-	if !withinBargainLimit {
-		systemPrompt += "\n当前买家已经超过最大砍价轮次。不得继续降价，只能礼貌说明价格不再优惠。"
-	}
+	systemPrompt := buildGeneralSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc)
+	return a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
+}
 
+func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool) (*ReplyResult, error) {
 	// 调 OpenAI 兼容接口。
 	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
 	if aiCfg.BaseURL != "" {
 		clientCfg.BaseURL = aiCfg.BaseURL
 	}
+	var err error
 	clientCfg.HTTPClient, err = newAIHTTPClient(clientCfg.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("AI API 地址无效: %w", err)
@@ -116,10 +126,9 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 
 	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	request := openai.ChatCompletionRequest{
-		Model:       aiCfg.Model,
-		Messages:    messages,
-		Temperature: 0.7,
+	request := openai.ChatCompletionRequest{Model: aiCfg.Model, Messages: messages, Temperature: 0.7}
+	if profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil {
+		request.Tools = []openai.Tool{adjustOrderPriceTool()}
 	}
 	// DashScope and compatible providers accept this extension for reasoning mode.
 	request.ChatTemplateKwargs = map[string]any{"thinking": map[string]string{"type": aiCfg.ThinkingMode}}
@@ -130,21 +139,35 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if len(resp.Choices) == 0 {
 		return nil, nil
 	}
-	reply := strings.TrimSpace(resp.Choices[0].Message.Content)
+	message := resp.Choices[0].Message
+	if len(message.ToolCalls) > 0 && profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil {
+		for _, call := range message.ToolCalls {
+			if call.Function.Name != adjustOrderPriceToolName {
+				continue
+			}
+			executor := &priceToolExecutor{replier: a, profile: profile, itemPrice: itemPrice, orderClient: a.orderPriceAdjuster, cookies: m.CookieStr, chatID: m.ChatID, buyerID: m.SenderUserID}
+			toolResult, toolErr := executor.execute(aiCtx, call.Function.Arguments)
+			if toolErr != nil {
+				toolResult = "改价未执行：" + toolErr.Error()
+			}
+			messages = append(messages, message, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleTool, Name: call.Function.Name, ToolCallID: call.ID, Content: toolResult})
+		}
+		request.Messages = messages
+		resp, err = client.CreateChatCompletion(aiCtx, request)
+		if err != nil {
+			return nil, fmt.Errorf("AI 工具结果调用失败: %w", err)
+		}
+		if len(resp.Choices) == 0 {
+			return nil, nil
+		}
+		message = resp.Choices[0].Message
+	}
+	reply := strings.TrimSpace(message.Content)
 	if reply == "" {
 		return nil, nil
 	}
 	silentExit := strings.Contains(reply, "<exit>")
-	minimumPrice := minimumAllowedPrice(itemPrice, profile.MaxDiscountPercent, profile.MaxDiscountAmount, withinBargainLimit)
 	if !silentExit {
-		if offered, unsafe := unsafeOfferedPrice(reply, minimumPrice); unsafe {
-			a.logger.Warn("AI 报价超过折扣边界，使用安全回复", "offered", offered, "minimum", minimumPrice)
-			if minimumPrice >= itemPrice || !withinBargainLimit {
-				reply = "抱歉，当前价格已经是最低价，暂时不能再优惠了。"
-			} else {
-				reply = fmt.Sprintf("可以优惠的最低价格是 %.2f 元，低于这个价格暂时无法成交。", minimumPrice)
-			}
-		}
 		reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
 		if err != nil {
 			return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
@@ -157,7 +180,7 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	}
 	if m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
-		if isBargain {
+		if profile.BargainStrategyEnabled {
 			intent = "bargain"
 		}
 		assistantIntent := "reply"
@@ -179,16 +202,14 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 }
 
 func (a *AIReplierImpl) conversationContext(ctx context.Context, profileID int64, m ChatMessage) ([]db.AIConversationMessage, int, bool, error) {
-	isBargain := bargainMessageRe.MatchString(strings.ToLower(m.Text))
 	if m.ChatID == "" || m.ItemID == "" {
-		return nil, 0, isBargain, nil
+		return nil, 0, false, nil
 	}
 	history, err := a.store.AIReply.ProfileConversationHistory(ctx, profileID, a.cookieID, m.ChatID, m.ItemID, 10)
 	if err != nil {
-		return nil, 0, isBargain, err
+		return nil, 0, false, err
 	}
-	count, err := a.store.AIReply.ProfileBargainCount(ctx, profileID, a.cookieID, m.ChatID, m.ItemID)
-	return history, count, isBargain, err
+	return history, 0, false, nil
 }
 
 type globalAIConfig struct {
@@ -328,10 +349,17 @@ func buildSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemD
 - 回复报价必须带“元”，不得给出低于允许最低价的价格。`, itemPrice, maxDiscountPercent, maxDiscountAmount, bargainCount, maxBargainRounds)
 }
 
-var priceRe = regexp.MustCompile(`[^\d.]`)
-var bargainMessageRe = regexp.MustCompile(`(?i)(便宜|优惠|少点|最低|砍价|降价|打折|能不能.*(?:元|块)|\d+(?:\.\d+)?\s*(?:元|块).*(?:卖|行|可以))`)
-var offeredPriceRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*(?:元|块)`)
+func buildGeneralSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemDesc string) string {
+	if strings.TrimSpace(customPrompts) != "" {
+		return strings.NewReplacer("{{item_title}}", itemTitle, "{{item_price}}", fmt.Sprintf("%.2f", itemPrice), "{{item_description}}", itemDesc, "{item_title}", itemTitle, "{item_price}", fmt.Sprintf("%.2f", itemPrice), "{item_description}", itemDesc).Replace(customPrompts)
+	}
+	return fmt.Sprintf("你是闲鱼卖家的自动回复助手，请根据商品信息自然回复买家。商品名称：%s；价格：%.2f 元；详情：%s。不要编造信息；若无需回复，请输出 <exit>。", itemTitle, itemPrice, itemDesc)
+}
 
+var priceRe = regexp.MustCompile(`[^\d.]`)
+
+// minimumAllowedPrice is retained for future tool-level policy validation; the AI
+// response path no longer rewrites model text based on extracted currency values.
 func minimumAllowedPrice(price float64, maxDiscountPercent, maxDiscountAmount int, allowDiscount bool) float64 {
 	if price <= 0 {
 		return 0
@@ -342,19 +370,6 @@ func minimumAllowedPrice(price float64, maxDiscountPercent, maxDiscountAmount in
 	byPercent := price * (1 - float64(maxDiscountPercent)/100)
 	byAmount := price - float64(maxDiscountAmount)
 	return math.Max(0, math.Max(byPercent, byAmount))
-}
-
-func unsafeOfferedPrice(reply string, minimum float64) (float64, bool) {
-	if minimum <= 0 {
-		return 0, false
-	}
-	for _, match := range offeredPriceRe.FindAllStringSubmatch(reply, -1) {
-		value, err := strconv.ParseFloat(match[1], 64)
-		if err == nil && value+0.0001 < minimum {
-			return value, true
-		}
-	}
-	return 0, false
 }
 
 func truncateAIContent(content string) string {

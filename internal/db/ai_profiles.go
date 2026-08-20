@@ -11,22 +11,23 @@ import (
 
 // AIProfile is an account-scoped AI assistant that can be assigned to items.
 type AIProfile struct {
-	ID                 int64    `json:"id"`
-	CookieID           string   `json:"cookie_id"`
-	Name               string   `json:"name"`
-	Enabled            bool     `json:"enabled"`
-	UseSystemAPI       bool     `json:"use_system_api"`
-	APIKey             string   `json:"-"`
-	HasAPIKey          bool     `json:"has_api_key"`
-	BaseURL            string   `json:"base_url"`
-	ModelName          string   `json:"model_name"`
-	ThinkingMode       string   `json:"thinking_mode"`
-	CustomPrompts      string   `json:"custom_prompts"`
-	TriggerMode        string   `json:"trigger_mode"`
-	MaxDiscountPercent int      `json:"max_discount_percent"`
-	MaxDiscountAmount  int      `json:"max_discount_amount"`
-	MaxBargainRounds   int      `json:"max_bargain_rounds"`
-	ItemIDs            []string `json:"item_ids"`
+	ID                     int64    `json:"id"`
+	CookieID               string   `json:"cookie_id"`
+	Name                   string   `json:"name"`
+	Enabled                bool     `json:"enabled"`
+	UseSystemAPI           bool     `json:"use_system_api"`
+	APIKey                 string   `json:"-"`
+	HasAPIKey              bool     `json:"has_api_key"`
+	BaseURL                string   `json:"base_url"`
+	ModelName              string   `json:"model_name"`
+	ThinkingMode           string   `json:"thinking_mode"`
+	BargainStrategyEnabled bool     `json:"bargain_strategy_enabled"`
+	CustomPrompts          string   `json:"custom_prompts"`
+	TriggerMode            string   `json:"trigger_mode"`
+	MaxDiscountPercent     int      `json:"max_discount_percent"`
+	MaxDiscountAmount      int      `json:"max_discount_amount"`
+	MaxBargainRounds       int      `json:"max_bargain_rounds"`
+	ItemIDs                []string `json:"item_ids"`
 }
 
 // AIForbiddenWord is a global deterministic post-processing rule.
@@ -46,7 +47,7 @@ type AIProfiles struct {
 }
 
 func (a *AIProfiles) List(ctx context.Context, cookieID string) ([]AIProfile, error) {
-	rows, err := a.DB.QueryContext(ctx, `SELECT id,cookie_id,name,enabled,use_system_api,COALESCE(api_key,''),COALESCE(base_url,''),COALESCE(model_name,''),COALESCE(thinking_mode,'disabled'),COALESCE(custom_prompts,''),COALESCE(trigger_mode,'all_text'),max_discount_percent,max_discount_amount,max_bargain_rounds FROM ai_profiles WHERE cookie_id=? ORDER BY id`, cookieID)
+	rows, err := a.DB.QueryContext(ctx, `SELECT id,cookie_id,name,enabled,use_system_api,COALESCE(api_key,''),COALESCE(base_url,''),COALESCE(model_name,''),COALESCE(thinking_mode,'disabled'),bargain_strategy_enabled,COALESCE(custom_prompts,''),COALESCE(trigger_mode,'all_text'),max_discount_percent,max_discount_amount,max_bargain_rounds FROM ai_profiles WHERE cookie_id=? ORDER BY id`, cookieID)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func (a *AIProfiles) List(ctx context.Context, cookieID string) ([]AIProfile, er
 }
 
 func (a *AIProfiles) Get(ctx context.Context, id int64) (*AIProfile, error) {
-	row := a.DB.QueryRowContext(ctx, `SELECT id,cookie_id,name,enabled,use_system_api,COALESCE(api_key,''),COALESCE(base_url,''),COALESCE(model_name,''),COALESCE(thinking_mode,'disabled'),COALESCE(custom_prompts,''),COALESCE(trigger_mode,'all_text'),max_discount_percent,max_discount_amount,max_bargain_rounds FROM ai_profiles WHERE id=?`, id)
+	row := a.DB.QueryRowContext(ctx, `SELECT id,cookie_id,name,enabled,use_system_api,COALESCE(api_key,''),COALESCE(base_url,''),COALESCE(model_name,''),COALESCE(thinking_mode,'disabled'),bargain_strategy_enabled,COALESCE(custom_prompts,''),COALESCE(trigger_mode,'all_text'),max_discount_percent,max_discount_amount,max_bargain_rounds FROM ai_profiles WHERE id=?`, id)
 	profile, err := a.scanProfile(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -80,7 +81,7 @@ func (a *AIProfiles) Get(ctx context.Context, id int64) (*AIProfile, error) {
 }
 
 func (a *AIProfiles) FindForItem(ctx context.Context, cookieID, itemID string) (*AIProfile, error) {
-	row := a.DB.QueryRowContext(ctx, `SELECT p.id,p.cookie_id,p.name,p.enabled,p.use_system_api,COALESCE(p.api_key,''),COALESCE(p.base_url,''),COALESCE(p.model_name,''),COALESCE(p.thinking_mode,'disabled'),COALESCE(p.custom_prompts,''),COALESCE(p.trigger_mode,'all_text'),p.max_discount_percent,p.max_discount_amount,p.max_bargain_rounds FROM ai_profiles p JOIN ai_profile_items i ON i.ai_profile_id=p.id WHERE i.cookie_id=? AND i.item_id=? AND p.enabled=1`, cookieID, itemID)
+	row := a.DB.QueryRowContext(ctx, `SELECT p.id,p.cookie_id,p.name,p.enabled,p.use_system_api,COALESCE(p.api_key,''),COALESCE(p.base_url,''),COALESCE(p.model_name,''),COALESCE(p.thinking_mode,'disabled'),p.bargain_strategy_enabled,COALESCE(p.custom_prompts,''),COALESCE(p.trigger_mode,'all_text'),p.max_discount_percent,p.max_discount_amount,p.max_bargain_rounds FROM ai_profiles p JOIN ai_profile_items i ON i.ai_profile_id=p.id WHERE i.cookie_id=? AND i.item_id=? AND p.enabled=1`, cookieID, itemID)
 	profile, err := a.scanProfile(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -96,14 +97,15 @@ type profileScanner interface{ Scan(...any) error }
 
 func (a *AIProfiles) scanProfile(scanner profileScanner) (AIProfile, error) {
 	var profile AIProfile
-	var enabled, useSystem int
+	var enabled, useSystem, bargainEnabled int
 	var encryptedKey string
-	err := scanner.Scan(&profile.ID, &profile.CookieID, &profile.Name, &enabled, &useSystem, &encryptedKey, &profile.BaseURL, &profile.ModelName, &profile.ThinkingMode, &profile.CustomPrompts, &profile.TriggerMode, &profile.MaxDiscountPercent, &profile.MaxDiscountAmount, &profile.MaxBargainRounds)
+	err := scanner.Scan(&profile.ID, &profile.CookieID, &profile.Name, &enabled, &useSystem, &encryptedKey, &profile.BaseURL, &profile.ModelName, &profile.ThinkingMode, &bargainEnabled, &profile.CustomPrompts, &profile.TriggerMode, &profile.MaxDiscountPercent, &profile.MaxDiscountAmount, &profile.MaxBargainRounds)
 	if err != nil {
 		return AIProfile{}, err
 	}
 	profile.Enabled = enabled != 0
 	profile.UseSystemAPI = useSystem != 0
+	profile.BargainStrategyEnabled = bargainEnabled != 0
 	profile.APIKey, err = a.codec.decrypt("ai-profile-api-key", strconv.FormatInt(profile.ID, 10), encryptedKey)
 	if err != nil {
 		return AIProfile{}, err
@@ -114,7 +116,7 @@ func (a *AIProfiles) scanProfile(scanner profileScanner) (AIProfile, error) {
 }
 
 func (a *AIProfiles) Create(ctx context.Context, profile AIProfile) (int64, error) {
-	return insertReturningID(ctx, a.DB, a.Dialect, `INSERT INTO ai_profiles (cookie_id,name,enabled,use_system_api,api_key,base_url,model_name,thinking_mode,custom_prompts,trigger_mode,max_discount_percent,max_discount_amount,max_bargain_rounds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, profile.CookieID, profile.Name, boolInt(profile.Enabled), boolInt(profile.UseSystemAPI), "", profile.BaseURL, profile.ModelName, normalizeThinkingMode(profile.ThinkingMode), profile.CustomPrompts, firstNonEmptyDB(profile.TriggerMode, "all_text"), profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds)
+	return insertReturningID(ctx, a.DB, a.Dialect, `INSERT INTO ai_profiles (cookie_id,name,enabled,use_system_api,api_key,base_url,model_name,thinking_mode,bargain_strategy_enabled,custom_prompts,trigger_mode,max_discount_percent,max_discount_amount,max_bargain_rounds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, profile.CookieID, profile.Name, boolInt(profile.Enabled), boolInt(profile.UseSystemAPI), "", profile.BaseURL, profile.ModelName, normalizeThinkingMode(profile.ThinkingMode), boolInt(profile.BargainStrategyEnabled), profile.CustomPrompts, firstNonEmptyDB(profile.TriggerMode, "all_text"), profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds)
 }
 
 func (a *AIProfiles) Update(ctx context.Context, profile AIProfile, apiKey *string, clearAPIKey bool) error {
@@ -123,7 +125,7 @@ func (a *AIProfiles) Update(ctx context.Context, profile AIProfile, apiKey *stri
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE ai_profiles SET name=?,enabled=?,use_system_api=?,base_url=?,model_name=?,thinking_mode=?,custom_prompts=?,trigger_mode=?,max_discount_percent=?,max_discount_amount=?,max_bargain_rounds=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND cookie_id=?`, profile.Name, boolInt(profile.Enabled), boolInt(profile.UseSystemAPI), profile.BaseURL, profile.ModelName, normalizeThinkingMode(profile.ThinkingMode), profile.CustomPrompts, firstNonEmptyDB(profile.TriggerMode, "all_text"), profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, profile.ID, profile.CookieID)
+	res, err := tx.ExecContext(ctx, `UPDATE ai_profiles SET name=?,enabled=?,use_system_api=?,base_url=?,model_name=?,thinking_mode=?,bargain_strategy_enabled=?,custom_prompts=?,trigger_mode=?,max_discount_percent=?,max_discount_amount=?,max_bargain_rounds=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND cookie_id=?`, profile.Name, boolInt(profile.Enabled), boolInt(profile.UseSystemAPI), profile.BaseURL, profile.ModelName, normalizeThinkingMode(profile.ThinkingMode), boolInt(profile.BargainStrategyEnabled), profile.CustomPrompts, firstNonEmptyDB(profile.TriggerMode, "all_text"), profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, profile.ID, profile.CookieID)
 	if err != nil {
 		return err
 	}

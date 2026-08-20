@@ -19,20 +19,21 @@ const (
 )
 
 type aiProfileRequest struct {
-	CookieID           string   `json:"cookie_id"`
-	Name               string   `json:"name"`
-	Enabled            bool     `json:"enabled"`
-	UseSystemAPI       bool     `json:"use_system_api"`
-	APIKey             *string  `json:"api_key"`
-	ClearAPIKey        bool     `json:"clear_api_key"`
-	BaseURL            string   `json:"base_url"`
-	ModelName          string   `json:"model_name"`
-	ThinkingMode       string   `json:"thinking_mode"`
-	CustomPrompts      string   `json:"custom_prompts"`
-	MaxDiscountPercent int      `json:"max_discount_percent"`
-	MaxDiscountAmount  int      `json:"max_discount_amount"`
-	MaxBargainRounds   int      `json:"max_bargain_rounds"`
-	ItemIDs            []string `json:"item_ids"`
+	CookieID               string   `json:"cookie_id"`
+	Name                   string   `json:"name"`
+	Enabled                bool     `json:"enabled"`
+	UseSystemAPI           bool     `json:"use_system_api"`
+	APIKey                 *string  `json:"api_key"`
+	ClearAPIKey            bool     `json:"clear_api_key"`
+	BaseURL                string   `json:"base_url"`
+	ModelName              string   `json:"model_name"`
+	ThinkingMode           string   `json:"thinking_mode"`
+	BargainStrategyEnabled bool     `json:"bargain_strategy_enabled"`
+	CustomPrompts          string   `json:"custom_prompts"`
+	MaxDiscountPercent     int      `json:"max_discount_percent"`
+	MaxDiscountAmount      int      `json:"max_discount_amount"`
+	MaxBargainRounds       int      `json:"max_bargain_rounds"`
+	ItemIDs                []string `json:"item_ids"`
 }
 
 func (s *Server) mountAIProfiles(r chi.Router) {
@@ -237,7 +238,7 @@ func validateAIProfileRequest(req aiProfileRequest) error {
 }
 
 func profileFromRequest(id int64, req aiProfileRequest) db.AIProfile {
-	return db.AIProfile{ID: id, CookieID: strings.TrimSpace(req.CookieID), Name: strings.TrimSpace(req.Name), Enabled: req.Enabled, UseSystemAPI: req.UseSystemAPI, BaseURL: strings.TrimSpace(req.BaseURL), ModelName: strings.TrimSpace(req.ModelName), ThinkingMode: req.ThinkingMode, CustomPrompts: req.CustomPrompts, TriggerMode: "all_text", MaxDiscountPercent: req.MaxDiscountPercent, MaxDiscountAmount: req.MaxDiscountAmount, MaxBargainRounds: req.MaxBargainRounds}
+	return db.AIProfile{ID: id, CookieID: strings.TrimSpace(req.CookieID), Name: strings.TrimSpace(req.Name), Enabled: req.Enabled, UseSystemAPI: req.UseSystemAPI, BaseURL: strings.TrimSpace(req.BaseURL), ModelName: strings.TrimSpace(req.ModelName), ThinkingMode: req.ThinkingMode, BargainStrategyEnabled: req.BargainStrategyEnabled, CustomPrompts: req.CustomPrompts, TriggerMode: "all_text", MaxDiscountPercent: req.MaxDiscountPercent, MaxDiscountAmount: req.MaxDiscountAmount, MaxBargainRounds: req.MaxBargainRounds}
 }
 func normalizeIDs(values []string) []string {
 	if values == nil {

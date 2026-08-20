@@ -106,6 +106,13 @@ func (a *AIReply) CurrentBargainCount(ctx context.Context, cookieID, chatID, ite
 	return a.ProfileBargainCount(ctx, 0, cookieID, chatID, itemID)
 }
 
+// HasProfileConversationMessage reports whether an exact context message already exists.
+func (a *AIReply) HasProfileConversationMessage(ctx context.Context, profileID int64, cookieID, chatID, itemID, role, content string) (bool, error) {
+	var exists bool
+	err := a.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ai_conversations WHERE ai_profile_id=? AND cookie_id=? AND chat_id=? AND item_id=? AND role=? AND content=?)`, profileID, cookieID, chatID, itemID, role, content).Scan(&exists)
+	return exists, err
+}
+
 func (a *AIReply) ProfileBargainCount(ctx context.Context, profileID int64, cookieID, chatID, itemID string) (int, error) {
 	var count int
 	err := a.DB.QueryRowContext(ctx, `

@@ -263,6 +263,7 @@ func runServer(parent context.Context, opts serverOptions) error {
 	chatService := chat.New(store)
 	ap.SetChatService(chatService)
 	mgr := account.NewManager(store, ap, logger)
+	ap.SetAccounts(mgr)
 	autoCenter := automation.New(store, mgr, logger)
 	autoCenter.SetOrderDetailFetcher(ap)
 	notifier := notify.New("", store, logger)

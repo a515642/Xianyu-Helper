@@ -68,6 +68,9 @@ type Adapter struct {
 	captchaReq tokenCaptchaRequester
 	orderMTop  orderDetailClient
 	chat       *chat.Service
+	accounts   interface {
+		GetInstance(string) (automation.MessageSender, bool)
+	}
 
 	orderFetchMu   sync.Mutex
 	lastOrderFetch time.Time
@@ -125,6 +128,11 @@ func browserManagerOrNil(bm *browser.Manager) browserManager {
 
 // SetAutomation 注入自动化中心（系统事件转发目标）。
 func (a *Adapter) SetAutomation(c *automation.Center) { a.automation = c }
+func (a *Adapter) SetAccounts(accounts interface {
+	GetInstance(string) (automation.MessageSender, bool)
+}) {
+	a.accounts = accounts
+}
 
 // SetNotifier 注入通知器（账号告警推送目标）。
 func (a *Adapter) SetNotifier(n notifyNotifier) { a.notifier = n }
@@ -394,11 +402,42 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 
 // HandleSystemEvent 把系统卡片事件转发到自动化中心，由自动化规则决定是否执行。
 func (a *Adapter) HandleSystemEvent(ctx context.Context, task automation.Task) error {
+	if task.TriggerType == automation.TriggerOrderCreated {
+		return a.handleOrderCreatedForAI(ctx, task)
+	}
 	if a.automation == nil {
 		return nil
 	}
 	a.logger.Info("系统自动化事件", "account", task.AccountID, "trigger", task.TriggerType, "order_id", task.OrderID)
 	return a.automation.HandleTask(ctx, task)
+}
+
+func (a *Adapter) handleOrderCreatedForAI(ctx context.Context, task automation.Task) error {
+	if a.store == nil || a.accounts == nil || task.OrderID == "" || task.ChatID == "" {
+		return nil
+	}
+	order, err := a.store.Orders.Get(ctx, task.OrderID)
+	if err != nil || order == nil || order.CookieID != task.AccountID || order.ChatID != task.ChatID {
+		return nil
+	}
+	profile, err := a.store.AIProfiles.FindForItem(ctx, task.AccountID, order.ItemID)
+	if err != nil || profile == nil || !profile.BargainStrategyEnabled {
+		return nil
+	}
+	const syntheticText = "我已经拍下但暂未付款，如果我们协商达成了一致的价格，请帮我修改订单价格。如果没有达成一致，请忽略本消息。"
+	if seen, seenErr := a.store.AIReply.HasProfileConversationMessage(ctx, profile.ID, task.AccountID, task.ChatID, order.ItemID, "user", syntheticText); seenErr != nil || seen {
+		return seenErr
+	}
+	sender, ok := a.accounts.GetInstance(task.AccountID)
+	if !ok {
+		return nil
+	}
+	if handler, ok := sender.(interface {
+		InjectAIMessage(context.Context, engine.ChatMessage) error
+	}); ok {
+		return handler.InjectAIMessage(ctx, engine.ChatMessage{AccountID: task.AccountID, CookieStr: task.CookieStr, ChatID: task.ChatID, SenderUserID: order.BuyerID, ItemID: order.ItemID, Text: syntheticText, MessageID: "order-created:" + task.OrderID})
+	}
+	return nil
 }
 
 // FetchOrderDetail 实现 automation.OrderDetailFetcher。只在本地订单缺少关键字段时
