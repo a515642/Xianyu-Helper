@@ -2,15 +2,28 @@ package mtop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"xianyu-go/internal/xianyu/protocol"
 )
 
-const AdjustPriceAPI = "mtop.taobao.idle.trade.user.adjust.price"
+// AdjustPriceAPI is the seller-side pending-order price adjustment endpoint.
+const AdjustPriceAPI = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.trade.user.adjust.price/1.0/"
 
-// AdjustPriceResult describes the platform response without exposing raw credentials.
+type adjustPricePayload struct {
+	ModifyFee       int64  `json:"modifyFee"`
+	NewTransportFee string `json:"newTransportFee"`
+	OrderID         string `json:"orderId"`
+}
+
+// AdjustPriceResult describes the platform response without exposing credentials.
 type AdjustPriceResult struct {
 	Success        bool
 	UpdatedCookies string
@@ -18,10 +31,8 @@ type AdjustPriceResult struct {
 	RawData        map[string]any
 }
 
-// AdjustOrderPrice changes the price of an existing order. TargetPriceCents is
-// expressed in integer cents; the caller remains responsible for business
-// authorization and confirmation policy.
-// AdjustOrderPrice 修改指定订单价格。调用方必须在更高层完成账号归属、订单状态和人工/LLM 工具授权校验。
+// AdjustOrderPrice changes a pending order's total price. The amount is in
+// integer cents; callers must enforce account/order authorization and policy.
 func (c *ClientImpl) AdjustOrderPrice(ctx context.Context, cookiesStr, orderID string, targetPriceCents int64) (*AdjustPriceResult, error) {
 	if strings.TrimSpace(orderID) == "" {
 		return nil, errors.New("订单 ID 不能为空")
@@ -29,26 +40,70 @@ func (c *ClientImpl) AdjustOrderPrice(ctx context.Context, cookiesStr, orderID s
 	if targetPriceCents <= 0 {
 		return nil, errors.New("改价金额必须大于 0")
 	}
-	data := map[string]any{
-		"orderId":     strings.TrimSpace(orderID),
-		"targetPrice": strconv.FormatInt(targetPriceCents, 10),
+	adjustURL := c.AdjustPriceURL
+	if adjustURL == "" {
+		adjustURL = AdjustPriceAPI
 	}
-	decoded, updated, err := c.accountTaskRequest(ctx, cookiesStr,
-		firstNonEmptyURL(c.AdjustPriceURL, "https://h5api.m.goofish.com/h5/"+AdjustPriceAPI+"/1.0/"),
-		AdjustPriceAPI, "1.0", data, "https://www.goofish.com/")
+	requestCookies, err := c.adjustPriceRequest(ctx, cookiesStr, adjustURL, orderID, targetPriceCents)
 	if err != nil {
 		return nil, err
 	}
-	ret := append([]string(nil), decoded.Ret...)
-	success := false
-	for _, value := range ret {
-		if strings.Contains(value, "SUCCESS") {
-			success = true
-			break
+	return requestCookies, nil
+}
+
+func (c *ClientImpl) adjustPriceRequest(ctx context.Context, cookiesStr, adjustURL, orderID string, targetPriceCents int64) (*AdjustPriceResult, error) {
+	signingCookies, requestCookies := mtopRequestCookies(ctx, cookiesStr, "https://www.goofish.com/", adjustURL)
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	payload := adjustPricePayload{ModifyFee: targetPriceCents, NewTransportFee: "0", OrderID: strings.TrimSpace(orderID)}
+	dataBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("序列化订单改价请求: %w", err)
+	}
+	dataValue := string(dataBytes)
+	sign := protocol.GenerateSign(timestamp, protocol.SignToken(signingCookies), dataValue)
+	query := buildAdjustPriceQuery(timestamp, sign)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, adjustURL+"?"+query, strings.NewReader("data="+url.QueryEscape(dataValue)))
+	if err != nil {
+		return nil, err
+	}
+	setCommonHeaders(req, requestCookies)
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("订单改价请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	updated := absorbMTopResponseCookies(ctx, cookiesStr, resp)
+	raw, err := readMTopBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Ret  []string `json:"ret"`
+		Data struct {
+			Success bool `json:"success"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("解析订单改价响应失败: %w (body=%s)", err, truncate(string(raw), 300))
+	}
+	success := result.Data.Success && hasMTopSuccess(result.Ret)
+	out := &AdjustPriceResult{Success: success, UpdatedCookies: updated, Ret: append([]string(nil), result.Ret...)}
+	if success {
+		return out, nil
+	}
+	return out, fmt.Errorf("改价接口返回失败: %s", strings.Join(result.Ret, "; "))
+}
+
+func buildAdjustPriceQuery(timestamp, sign string) string {
+	parts := [][2]string{{"jsv", "2.7.2"}, {"appKey", protocol.SignAppKey}, {"t", timestamp}, {"sign", sign}, {"v", "1.0"}, {"type", "originaljson"}, {"accountSite", "xianyu"}, {"dataType", "json"}, {"timeout", "20000"}, {"api", "mtop.taobao.idle.trade.user.adjust.price"}, {"sessionOption", "AutoLoginOnly"}}
+	var b strings.Builder
+	for i, pair := range parts {
+		if i > 0 {
+			b.WriteByte('&')
 		}
+		b.WriteString(pair[0])
+		b.WriteByte('=')
+		b.WriteString(pair[1])
 	}
-	if !success {
-		return &AdjustPriceResult{Success: false, UpdatedCookies: updated, Ret: ret, RawData: decoded.Data}, fmt.Errorf("改价接口返回失败: %s", strings.Join(ret, "; "))
-	}
-	return &AdjustPriceResult{Success: true, UpdatedCookies: updated, Ret: ret, RawData: decoded.Data}, nil
+	return b.String()
 }
