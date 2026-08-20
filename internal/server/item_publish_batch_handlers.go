@@ -877,6 +877,25 @@ func (s *Server) publishBatchRow(ctx context.Context, userID int64, client mtop.
 	if err := json.Unmarshal([]byte(locationJSON), &location); err != nil {
 		return errors.New("批量任务发货地配置损坏，请重新创建任务")
 	}
+	if strings.TrimSpace(location.DivisionID) == "" {
+		// Legacy v1.0.2 batches persisted PascalCase location keys.
+		var legacy struct {
+			Area       string  `json:"Area"`
+			City       string  `json:"City"`
+			DivisionID string  `json:"DivisionID"`
+			Longitude  float64 `json:"Longitude"`
+			Latitude   float64 `json:"Latitude"`
+			POIID      string  `json:"POIID"`
+			POIName    string  `json:"POIName"`
+			Province   string  `json:"Province"`
+		}
+		if err := json.Unmarshal([]byte(locationJSON), &legacy); err != nil {
+			return errors.New("批量任务发货地配置损坏，请重新创建任务")
+		}
+		if strings.TrimSpace(legacy.DivisionID) != "" {
+			location = mtop.PublishLocation{Area: legacy.Area, City: legacy.City, DivisionID: legacy.DivisionID, Longitude: legacy.Longitude, Latitude: legacy.Latitude, POIID: legacy.POIID, POIName: legacy.POIName, Province: legacy.Province}
+		}
+	}
 	var selectedLocation *mtop.PublishLocation
 	if strings.TrimSpace(location.DivisionID) != "" {
 		selectedLocation = &location

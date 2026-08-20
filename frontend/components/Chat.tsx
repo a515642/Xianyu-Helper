@@ -59,6 +59,12 @@ const Chat: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [search, setSearch] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const totalUnread = useMemo(() => Object.values(sessionsByAccount).flat().reduce((sum, session) => sum + session.unread_count, 0), [sessionsByAccount]);
+
+  useEffect(() => {
+    document.title = totalUnread > 0 ? `(${totalUnread > 99 ? '99+' : totalUnread}) 新消息 · 闲鱼助手` : '闲鱼助手';
+    return () => { document.title = '闲鱼助手'; };
+  }, [totalUnread]);
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
