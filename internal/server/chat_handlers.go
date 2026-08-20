@@ -382,7 +382,7 @@ func (s *Server) markChatRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "无权操作该账号")
 		return
 	}
-	slog.Info("收到聊天已读请求", "account", input.AccountID, "chat_id", input.ChatID, "message_count", len(input.MessageIDs))
+	slog.Debug("收到聊天已读请求", "account", input.AccountID, "chat_id", input.ChatID, "message_count", len(input.MessageIDs))
 	if len(input.MessageIDs) == 0 {
 		// 兼容只传会话 ID 的调用方：从本地最近消息补齐平台消息 ID。
 		userID := auth.SessionFromContext(r.Context()).UserID
@@ -431,7 +431,7 @@ func (s *Server) resolveChatReadMessageIDs(ctx context.Context, accountID, chatI
 		}
 		if !strings.HasSuffix(id, ".PNM") {
 			if platformID := s.lookupChatPlatformMessageID(ctx, accountID, chatID, id); platformID != "" {
-				slog.Info("已将旧聊天消息 ID 转换为平台 PNM", "account", accountID, "chat_id", chatID, "old_message_id", id, "message_id", platformID)
+				slog.Debug("已将旧聊天消息 ID 转换为平台 PNM", "account", accountID, "chat_id", chatID, "old_message_id", id, "message_id", platformID)
 				id = platformID
 			} else {
 				slog.Warn("未找到旧聊天消息对应的 PNM，跳过已读上报", "account", accountID, "chat_id", chatID, "message_id", id)
