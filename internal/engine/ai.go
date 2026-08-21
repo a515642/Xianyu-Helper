@@ -5,38 +5,53 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
 
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/netguard"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 const (
 	defaultAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 	defaultAIModel   = "qwen-plus"
+	aiRequestTimeout = 2 * time.Minute
 )
 
 var newAIHTTPClient = func(baseURL string) (*http.Client, error) {
-	return netguard.TrustedEndpointHTTPClient(baseURL, 30*time.Second)
+	return netguard.TrustedEndpointHTTPClient(baseURL, aiRequestTimeout)
 }
 
 // AIReplierImpl AI 回复实现。
 type AIReplierImpl struct {
-	cookieID string
-	store    *db.Store
-	logger   *slog.Logger
+	cookieID           string
+	store              *db.Store
+	logger             *slog.Logger
+	orderPriceAdjuster interface {
+		AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
+	}
 }
 
 // NewAIReplier 构造。
+func (a *AIReplierImpl) SetOrderPriceAdjuster(adjuster interface {
+	AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
+}) {
+	a.orderPriceAdjuster = adjuster
+}
+
 func NewAIReplier(cookieID string, store *db.Store, logger *slog.Logger) *AIReplierImpl {
 	if logger == nil {
 		logger = slog.Default()
@@ -50,51 +65,75 @@ func NewAIReplier(cookieID string, store *db.Store, logger *slog.Logger) *AIRepl
 
 // Reply 实现 AIReplier 接口。
 func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult, error) {
-	cfg, err := a.store.AIReply.Get(ctx, a.cookieID)
-	if err != nil || cfg == nil || !cfg.AIEnabled {
-		return nil, nil // 未启用 AI
+	started := time.Now()
+	a.logger.Info("AI诊断：消息进入 AI 回复", "chat_id", m.ChatID, "item_id", m.ItemID, "message_kind", classifyAIMessage(m), "text_len", len([]rune(m.Text)))
+	if strings.TrimSpace(m.ItemID) == "" && strings.TrimSpace(m.ChatID) != "" && a.store.Chats != nil {
+		if itemID, err := a.store.Chats.SessionItemID(ctx, a.cookieID, m.ChatID); err == nil {
+			m.ItemID = itemID
+			a.logger.Debug("AI诊断：从会话补全商品 ID", "chat_id", m.ChatID, "item_id", m.ItemID)
+		} else {
+			a.logger.Warn("AI诊断：从会话补全商品 ID 失败", "chat_id", m.ChatID, "error_type", fmt.Sprintf("%T", err))
+		}
 	}
-	// AI 设置面向砍价场景。普通未命中消息继续交给默认回复，避免 AI
-	// 抢答问候、售后等与砍价无关的消息。
-	if !bargainMessageRe.MatchString(strings.ToLower(m.Text)) {
+	if strings.TrimSpace(m.ItemID) == "" {
+		a.logger.Info("AI诊断：消息跳过，缺少商品 ID", "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond))
 		return nil, nil
 	}
-	aiCfg, err := a.globalAIConfig(ctx)
+	profile, err := a.store.AIProfiles.FindForItem(ctx, a.cookieID, m.ItemID)
+	if errors.Is(err, db.ErrNotFound) {
+		a.logger.Info("AI诊断：消息跳过，商品未绑定启用的 AI 助手", "chat_id", m.ChatID, "item_id", m.ItemID, "reason", "profile_not_found")
+		return nil, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("读取全局 AI 配置失败: %w", err)
+		a.logger.Warn("AI诊断：读取商品 AI 绑定失败", "chat_id", m.ChatID, "item_id", m.ItemID, "error_type", fmt.Sprintf("%T", err))
+		return nil, fmt.Errorf("读取商品 AI 绑定失败: %w", err)
+	}
+	aiCfg, err := a.effectiveAIConfig(ctx, profile)
+	if err != nil {
+		a.logger.Warn("AI诊断：读取 AI API 配置失败", "profile", profile.ID, "error_type", fmt.Sprintf("%T", err))
+		return nil, fmt.Errorf("读取 AI API 配置失败: %w", err)
 	}
 	if aiCfg.APIKey == "" {
-		a.logger.Warn("AI 已启用但未配置 APIKey")
+		a.logger.Warn("AI诊断：助手已启用但未配置 API Key", "profile", profile.ID, "chat_id", m.ChatID)
 		return nil, nil
 	}
 
 	// 取商品信息和当前会话状态构造 system prompt。
 	itemTitle, itemPrice, itemDesc := a.itemInfo(ctx, m.ItemID)
-	history, bargainCount, isBargain, err := a.conversationContext(ctx, m)
+	history, bargainCount, _, err := a.conversationContext(ctx, profile.ID, m)
 	if err != nil {
+		a.logger.Warn("AI诊断：读取 AI 对话历史失败", "profile", profile.ID, "chat_id", m.ChatID, "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("读取 AI 对话历史失败: %w", err)
 	}
-	if isBargain {
-		bargainCount++
+	a.logger.Debug("AI诊断：AI 请求上下文已准备", "profile", profile.ID, "chat_id", m.ChatID, "item_id", m.ItemID, "history_count", len(history), "bargain_enabled", profile.BargainStrategyEnabled, "model", aiCfg.Model, "endpoint_host", endpointHost(aiCfg.BaseURL))
+	withinBargainLimit := true
+	if profile.BargainStrategyEnabled {
+		systemPrompt := buildSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
+		systemPrompt += "\n请自行判断买家是否在议价；只有确实需要议价时才考虑后续改价工具。"
+		result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
+		a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
+		return result, replyErr
 	}
-	withinBargainLimit := !isBargain || bargainCount <= cfg.MaxBargainRounds
-	systemPrompt := buildSystemPrompt(
-		cfg.CustomPrompts, itemTitle, itemPrice, itemDesc,
-		cfg.MaxDiscountPercent, cfg.MaxDiscountAmount, cfg.MaxBargainRounds, bargainCount,
-	)
-	if !withinBargainLimit {
-		systemPrompt += "\n当前买家已经超过最大砍价轮次。不得继续降价，只能礼貌说明价格不再优惠。"
-	}
+	systemPrompt := buildGeneralSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc)
+	result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
+	a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
+	return result, replyErr
+}
 
+func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool) (*ReplyResult, error) {
 	// 调 OpenAI 兼容接口。
 	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
 	if aiCfg.BaseURL != "" {
 		clientCfg.BaseURL = aiCfg.BaseURL
 	}
+	var err error
 	clientCfg.HTTPClient, err = newAIHTTPClient(clientCfg.BaseURL)
 	if err != nil {
+		a.logger.Warn("AI诊断：创建 AI HTTP 客户端失败", "profile", profile.ID, "endpoint_host", endpointHost(aiCfg.BaseURL), "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("AI API 地址无效: %w", err)
 	}
+	probe := &aiRequestProbe{}
+	clientCfg.HTTPClient = &aiObservingClient{base: clientCfg.HTTPClient, probe: probe}
 	client := openai.NewClientWithConfig(clientCfg)
 
 	messages := []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleSystem, Content: systemPrompt}}
@@ -107,64 +146,298 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	}
 	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: m.Text})
 
-	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	aiCtx, cancel := context.WithTimeout(ctx, aiRequestTimeout)
 	defer cancel()
-	resp, err := client.CreateChatCompletion(aiCtx, openai.ChatCompletionRequest{
-		Model:       aiCfg.Model,
-		Messages:    messages,
-		Temperature: 0.7,
-	})
+	request := openai.ChatCompletionRequest{Model: aiCfg.Model, Messages: messages, Temperature: 0.7}
+	toolEnabled := profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil
+	toolReason := "disabled"
+	if !profile.BargainStrategyEnabled {
+		toolReason = "bargain_strategy_disabled"
+	} else if a.orderPriceAdjuster == nil {
+		toolReason = "order_price_adjuster_missing"
+	} else {
+		toolReason = "enabled"
+	}
+	if toolEnabled {
+		request.Tools = []openai.Tool{adjustOrderPriceTool()}
+		// DeepSeek reasoning mode rejects a forced function tool_choice. Keep the
+		// tool available and let the model decide whether to call it; non-thinking
+		// providers retain the stricter forced choice for bargain requests.
+		if aiCfg.ThinkingMode != "enabled" {
+			request.ToolChoice = openai.ToolChoice{Type: openai.ToolTypeFunction, Function: openai.ToolFunction{Name: adjustOrderPriceToolName}}
+		}
+	}
+	// DashScope and compatible providers accept this extension for reasoning mode.
+	request.ChatTemplateKwargs = map[string]any{"thinking": map[string]string{"type": aiCfg.ThinkingMode}}
+	requestStarted := time.Now()
+	endpointPath := endpointCompletionPath(aiCfg.BaseURL)
+	a.logger.Info("AI诊断：开始调用 LLM", "phase", "initial_request", "profile", profile.ID, "chat_id", m.ChatID, "model", aiCfg.Model, "endpoint_host", endpointHost(aiCfg.BaseURL), "endpoint_path", endpointPath, "history_count", len(history), "tool_enabled", toolEnabled, "tool_reason", toolReason, "tool_count", len(request.Tools), "tool_choice", toolChoiceName(request.ToolChoice), "deadline_ms", aiCtxDeadline(aiCtx))
+	resp, err := client.CreateChatCompletion(aiCtx, request)
 	if err != nil {
+		a.logger.Warn("AI诊断：LLM 首次调用失败", "phase", "initial_request", "profile", profile.ID, "chat_id", m.ChatID, "endpoint_path", endpointPath, "duration", time.Since(requestStarted).Round(time.Millisecond), "failure_class", classifyAIRequestError(err, aiCtx), "error_type", fmt.Sprintf("%T", err), "error_summary", safeAIErrorSummary(err))
+		path, status, requestID, wrote, firstByte := probe.snapshot()
+		a.logger.Warn("AI诊断：LLM 请求观测", "phase", "initial_request", "endpoint_path", path, "status", status, "request_id", requestID, "request_written", wrote, "first_response_byte", firstByte)
 		return nil, fmt.Errorf("AI 调用失败: %w", err)
 	}
 	if len(resp.Choices) == 0 {
+		a.logger.Warn("AI诊断：LLM 返回空 choices", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(requestStarted).Round(time.Millisecond))
 		return nil, nil
 	}
-	reply := strings.TrimSpace(resp.Choices[0].Message.Content)
+	message := resp.Choices[0].Message
+	a.logger.Info("AI诊断：LLM 首次调用完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(requestStarted).Round(time.Millisecond), "tool_calls", len(message.ToolCalls), "finish_reason", resp.Choices[0].FinishReason, "content_len", len([]rune(message.Content)))
+	if len(message.ToolCalls) > 0 && toolEnabled {
+		for _, call := range message.ToolCalls {
+			a.logger.Info("AI诊断：收到 LLM 工具调用", "profile", profile.ID, "chat_id", m.ChatID, "tool", call.Function.Name, "call_id_present", call.ID != "", "arguments_len", len(call.Function.Arguments))
+			if call.Function.Name != adjustOrderPriceToolName {
+				a.logger.Warn("AI诊断：忽略未知 LLM 工具", "profile", profile.ID, "tool", call.Function.Name)
+				continue
+			}
+			executor := &priceToolExecutor{replier: a, profile: profile, itemPrice: itemPrice, orderClient: a.orderPriceAdjuster, cookies: m.CookieStr, chatID: m.ChatID, buyerID: m.SenderUserID}
+			toolResult, toolErr := executor.execute(aiCtx, call.Function.Arguments)
+			if toolErr != nil {
+				a.logger.Warn("AI诊断：改价工具执行失败", "profile", profile.ID, "chat_id", m.ChatID, "error_type", fmt.Sprintf("%T", toolErr))
+				toolResult = "改价未执行：" + toolErr.Error()
+			} else {
+				a.logger.Info("AI诊断：改价工具执行成功", "profile", profile.ID, "chat_id", m.ChatID, "result_len", len([]rune(toolResult)))
+			}
+			messages = append(messages, message, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleTool, Name: call.Function.Name, ToolCallID: call.ID, Content: toolResult})
+			a.logger.Info("AI诊断：改价工具结果已追加到 LLM 请求", "profile", profile.ID, "chat_id", m.ChatID, "tool", call.Function.Name, "tool_call_id_present", call.ID != "", "tool_result_len", len([]rune(toolResult)), "message_count", len(messages))
+		}
+		request.Messages = messages
+		a.logger.Info("AI诊断：准备发送包含工具结果的 LLM 请求", "phase", "tool_followup", "profile", profile.ID, "chat_id", m.ChatID, "endpoint_path", endpointPath, "message_count", len(request.Messages), "tool_count", len(request.Tools))
+		toolRequestStarted := time.Now()
+		probe.reset()
+		a.logger.Info("AI诊断：开始将改价工具结果交给 LLM", "phase", "tool_followup", "profile", profile.ID, "chat_id", m.ChatID, "endpoint_path", endpointPath)
+		resp, err = client.CreateChatCompletion(aiCtx, request)
+		if err != nil {
+			path, status, requestID, wrote, firstByte := probe.snapshot()
+			a.logger.Warn("AI诊断：LLM 工具结果调用失败", "phase", "tool_followup", "profile", profile.ID, "chat_id", m.ChatID, "endpoint_path", endpointPath, "duration", time.Since(toolRequestStarted).Round(time.Millisecond), "failure_class", classifyAIRequestError(err, aiCtx), "error_type", fmt.Sprintf("%T", err), "error_summary", safeAIErrorSummary(err), "observed_path", path, "status", status, "request_id", requestID, "request_written", wrote, "first_response_byte", firstByte)
+			return nil, fmt.Errorf("AI 工具结果调用失败: %w", err)
+		}
+		if len(resp.Choices) == 0 {
+			a.logger.Warn("AI诊断：LLM 工具结果调用返回空 choices", "profile", profile.ID, "chat_id", m.ChatID)
+			return nil, nil
+		}
+		message = resp.Choices[0].Message
+		if len(message.ToolCalls) > 0 {
+			a.logger.Warn("AI诊断：LLM 工具结果请求仍返回工具调用", "profile", profile.ID, "chat_id", m.ChatID, "tool_calls", len(message.ToolCalls))
+		}
+		a.logger.Info("AI诊断：LLM 工具结果调用完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(toolRequestStarted).Round(time.Millisecond), "content_len", len([]rune(message.Content)), "followup_tool_calls", len(message.ToolCalls))
+	} else if len(message.ToolCalls) > 0 {
+		a.logger.Warn("AI诊断：收到工具调用但改价工具未启用", "profile", profile.ID, "chat_id", m.ChatID, "tool_calls", len(message.ToolCalls))
+	}
+	reply := strings.TrimSpace(message.Content)
 	if reply == "" {
+		a.logger.Info("AI诊断：LLM 最终回复为空", "profile", profile.ID, "chat_id", m.ChatID)
 		return nil, nil
 	}
-	minimumPrice := minimumAllowedPrice(itemPrice, cfg.MaxDiscountPercent, cfg.MaxDiscountAmount, withinBargainLimit)
-	if offered, unsafe := unsafeOfferedPrice(reply, minimumPrice); unsafe {
-		a.logger.Warn("AI 报价超过折扣边界，使用安全回复", "offered", offered, "minimum", minimumPrice)
-		if minimumPrice >= itemPrice || !withinBargainLimit {
-			reply = "抱歉，当前价格已经是最低价，暂时不能再优惠了。"
-		} else {
-			reply = fmt.Sprintf("可以优惠的最低价格是 %.2f 元，低于这个价格暂时无法成交。", minimumPrice)
+	silentExit := strings.Contains(reply, "<exit>")
+	a.logger.Info("AI诊断：得到 LLM 最终回复", "profile", profile.ID, "chat_id", m.ChatID, "silent_exit", silentExit, "content_len", len([]rune(reply)))
+	if !silentExit {
+		reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
+		if err != nil {
+			return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
+		}
+		reply = strings.TrimSpace(reply)
+		if reply == "" {
+			a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
+			return nil, nil
 		}
 	}
 	if m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
-		if isBargain {
+		if profile.BargainStrategyEnabled {
 			intent = "bargain"
 		}
-		if err := a.store.AIReply.AddConversationExchange(ctx, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
+		assistantIntent := "reply"
+		if silentExit {
+			assistantIntent = "silent_exit"
+		}
+		if err := a.store.AIReply.AddProfileConversationExchange(ctx, profile.ID, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
 			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: intent, BargainCount: bargainCount},
-			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply", BargainCount: bargainCount},
+			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: assistantIntent, BargainCount: bargainCount},
 		); err != nil {
 			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
 		}
 	}
+	if silentExit {
+		a.logger.Info("AI 选择静默处理消息", "profile", profile.ID, "chat", m.ChatID)
+		return &ReplyResult{Skip: true}, nil
+	}
 	return &ReplyResult{Text: reply}, nil
 }
 
-func (a *AIReplierImpl) conversationContext(ctx context.Context, m ChatMessage) ([]db.AIConversationMessage, int, bool, error) {
-	isBargain := bargainMessageRe.MatchString(strings.ToLower(m.Text))
+func toolChoiceName(choice any) string {
+	if typed, ok := choice.(openai.ToolChoice); ok {
+		return typed.Function.Name
+	}
+	if value, ok := choice.(string); ok {
+		return value
+	}
+	return "none"
+}
+
+func classifyAIMessage(m ChatMessage) string {
+	if strings.HasPrefix(m.MessageID, "order-created:") {
+		return "order_created_synthetic"
+	}
+	return "buyer_chat"
+}
+
+func endpointHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "invalid"
+	}
+	return u.Hostname()
+}
+
+func endpointCompletionPath(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "<invalid>/chat/completions"
+	}
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	if path == "" {
+		path = ""
+	}
+	return path + "/chat/completions"
+}
+
+func aiCtxDeadline(ctx context.Context) int64 {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return time.Until(deadline).Milliseconds()
+}
+
+type aiRequestProbe struct {
+	mu          sync.Mutex
+	requestPath string
+	status      int
+	requestID   string
+	wrote       bool
+	firstByte   bool
+}
+
+type aiObservingClient struct {
+	base  openai.HTTPDoer
+	probe *aiRequestProbe
+}
+
+func (t *aiObservingClient) Do(req *http.Request) (*http.Response, error) {
+	probe := t.probe
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			probe.mu.Lock()
+			probe.wrote = info.Err == nil
+			probe.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			probe.mu.Lock()
+			probe.firstByte = true
+			probe.mu.Unlock()
+		},
+	}
+	resp, err := t.base.Do(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+	probe.mu.Lock()
+	probe.requestPath = req.URL.EscapedPath()
+	if resp != nil {
+		probe.status = resp.StatusCode
+		probe.requestID = strings.TrimSpace(resp.Header.Get("X-Request-ID"))
+	}
+	probe.mu.Unlock()
+	return resp, err
+}
+
+func (p *aiRequestProbe) reset() {
+	p.mu.Lock()
+	p.requestPath, p.status, p.requestID, p.wrote, p.firstByte = "", 0, "", false, false
+	p.mu.Unlock()
+}
+
+func (p *aiRequestProbe) snapshot() (path string, status int, requestID string, wrote, firstByte bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requestPath, p.status, p.requestID, p.wrote, p.firstByte
+}
+
+func classifyAIRequestError(err error, ctx context.Context) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		return "timeout"
+	}
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		return "upstream"
+	}
+	var requestErr *openai.RequestError
+	if errors.As(err, &requestErr) {
+		if requestErr.HTTPStatusCode > 0 {
+			return "upstream"
+		}
+		return "transport"
+	}
+	return "transport"
+}
+
+func safeAIErrorSummary(err error) string {
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		return truncateAISummary(apiErr.Message)
+	}
+	var requestErr *openai.RequestError
+	if errors.As(err, &requestErr) {
+		return fmt.Sprintf("status=%d", requestErr.HTTPStatusCode)
+	}
+	return fmt.Sprintf("error_type=%T", err)
+}
+
+func truncateAISummary(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) > 200 {
+		return value[:200] + "..."
+	}
+	return value
+}
+
+func (a *AIReplierImpl) conversationContext(ctx context.Context, profileID int64, m ChatMessage) ([]db.AIConversationMessage, int, bool, error) {
 	if m.ChatID == "" || m.ItemID == "" {
-		return nil, 0, isBargain, nil
+		return nil, 0, false, nil
 	}
-	history, err := a.store.AIReply.ConversationHistory(ctx, a.cookieID, m.ChatID, m.ItemID, 10)
+	history, err := a.store.AIReply.ProfileConversationHistory(ctx, profileID, a.cookieID, m.ChatID, m.ItemID, 10)
 	if err != nil {
-		return nil, 0, isBargain, err
+		return nil, 0, false, err
 	}
-	count, err := a.store.AIReply.CurrentBargainCount(ctx, a.cookieID, m.ChatID, m.ItemID)
-	return history, count, isBargain, err
+	return history, 0, false, nil
 }
 
 type globalAIConfig struct {
-	APIKey  string
-	BaseURL string
-	Model   string
+	APIKey       string
+	BaseURL      string
+	Model        string
+	ThinkingMode string
+}
+
+func (a *AIReplierImpl) effectiveAIConfig(ctx context.Context, profile *db.AIProfile) (*globalAIConfig, error) {
+	global, err := a.globalAIConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil || profile.UseSystemAPI {
+		return global, nil
+	}
+	if strings.TrimSpace(profile.APIKey) != "" {
+		global.APIKey = strings.TrimSpace(profile.APIKey)
+	}
+	if strings.TrimSpace(profile.BaseURL) != "" {
+		global.BaseURL = strings.TrimRight(strings.TrimSpace(profile.BaseURL), "/")
+	}
+	if strings.TrimSpace(profile.ModelName) != "" {
+		global.Model = strings.TrimSpace(profile.ModelName)
+	}
+	global.ThinkingMode = normalizeThinkingMode(profile.ThinkingMode)
+	return global, nil
 }
 
 func (a *AIReplierImpl) globalAIConfig(ctx context.Context) (*globalAIConfig, error) {
@@ -186,6 +459,10 @@ func (a *AIReplierImpl) globalAIConfig(ctx context.Context) (*globalAIConfig, er
 	if err != nil {
 		return nil, err
 	}
+	thinkingMode, err := a.store.Settings.Get(ctx, "ai_thinking_mode")
+	if err != nil {
+		return nil, err
+	}
 
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
@@ -195,10 +472,16 @@ func (a *AIReplierImpl) globalAIConfig(ctx context.Context) (*globalAIConfig, er
 	if model == "" {
 		model = defaultAIModel
 	}
+	if strings.EqualFold(strings.TrimSpace(thinkingMode), "enabled") {
+		thinkingMode = "enabled"
+	} else {
+		thinkingMode = "disabled"
+	}
 	return &globalAIConfig{
-		APIKey:  strings.TrimSpace(apiKey),
-		BaseURL: baseURL,
-		Model:   model,
+		APIKey:       strings.TrimSpace(apiKey),
+		BaseURL:      baseURL,
+		Model:        model,
+		ThinkingMode: thinkingMode,
 	}, nil
 }
 
@@ -225,10 +508,20 @@ func (a *AIReplierImpl) itemInfo(ctx context.Context, itemID string) (title stri
 
 // buildSystemPrompt 构造 system 提示词。
 // 自定义 prompt 只替换业务文案，价格和轮次安全约束始终由后端追加。
+func normalizeThinkingMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "enabled") {
+		return "enabled"
+	}
+	return "disabled"
+}
+
 func buildSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemDesc string, maxDiscountPercent, maxDiscountAmount, maxBargainRounds, bargainCount int) string {
 	var base string
 	if strings.TrimSpace(customPrompts) != "" {
 		base = strings.NewReplacer(
+			"{{item_title}}", itemTitle,
+			"{{item_price}}", fmt.Sprintf("%.2f", itemPrice),
+			"{{item_description}}", itemDesc,
 			"{item_title}", itemTitle,
 			"{item_price}", fmt.Sprintf("%.2f", itemPrice),
 			"{item_description}", itemDesc,
@@ -256,10 +549,17 @@ func buildSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemD
 - 回复报价必须带“元”，不得给出低于允许最低价的价格。`, itemPrice, maxDiscountPercent, maxDiscountAmount, bargainCount, maxBargainRounds)
 }
 
-var priceRe = regexp.MustCompile(`[^\d.]`)
-var bargainMessageRe = regexp.MustCompile(`(?i)(便宜|优惠|少点|最低|砍价|降价|打折|能不能.*(?:元|块)|\d+(?:\.\d+)?\s*(?:元|块).*(?:卖|行|可以))`)
-var offeredPriceRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*(?:元|块)`)
+func buildGeneralSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemDesc string) string {
+	if strings.TrimSpace(customPrompts) != "" {
+		return strings.NewReplacer("{{item_title}}", itemTitle, "{{item_price}}", fmt.Sprintf("%.2f", itemPrice), "{{item_description}}", itemDesc, "{item_title}", itemTitle, "{item_price}", fmt.Sprintf("%.2f", itemPrice), "{item_description}", itemDesc).Replace(customPrompts)
+	}
+	return fmt.Sprintf("你是闲鱼卖家的自动回复助手，请根据商品信息自然回复买家。商品名称：%s；价格：%.2f 元；详情：%s。不要编造信息；若无需回复，请输出 <exit>。", itemTitle, itemPrice, itemDesc)
+}
 
+var priceRe = regexp.MustCompile(`[^\d.]`)
+
+// minimumAllowedPrice is retained for future tool-level policy validation; the AI
+// response path no longer rewrites model text based on extracted currency values.
 func minimumAllowedPrice(price float64, maxDiscountPercent, maxDiscountAmount int, allowDiscount bool) float64 {
 	if price <= 0 {
 		return 0
@@ -270,19 +570,6 @@ func minimumAllowedPrice(price float64, maxDiscountPercent, maxDiscountAmount in
 	byPercent := price * (1 - float64(maxDiscountPercent)/100)
 	byAmount := price - float64(maxDiscountAmount)
 	return math.Max(0, math.Max(byPercent, byAmount))
-}
-
-func unsafeOfferedPrice(reply string, minimum float64) (float64, bool) {
-	if minimum <= 0 {
-		return 0, false
-	}
-	for _, match := range offeredPriceRe.FindAllStringSubmatch(reply, -1) {
-		value, err := strconv.ParseFloat(match[1], 64)
-		if err == nil && value+0.0001 < minimum {
-			return value, true
-		}
-	}
-	return 0, false
 }
 
 func truncateAIContent(content string) string {

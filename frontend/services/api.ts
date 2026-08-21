@@ -3,8 +3,8 @@ import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType,
-  NotificationChannel, NotificationEventType
-	, AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
+  NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
+  AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
 
@@ -46,9 +46,30 @@ export const updateLoginCredentials = async (data: {
   return put('/account/credentials', data);
 };
 
+// Product-scoped AI assistants
+const normalizeAIProfile = (profile: AIProfile): AIProfile => ({
+  ...profile,
+  item_ids: Array.isArray(profile.item_ids) ? profile.item_ids : [],
+});
+
+export const getAIProfiles = async (cookieId: string): Promise<AIProfile[]> => {
+  const profiles = await get<AIProfile[]>('/ai-profiles', { cookie_id: cookieId });
+  return (Array.isArray(profiles) ? profiles : []).map(normalizeAIProfile);
+};
+export const createAIProfile = async (input: AIProfileInput): Promise<AIProfile> => post('/ai-profiles', input);
+export const updateAIProfile = async (id: number, input: Partial<AIProfileInput>): Promise<AIProfile> => put(`/ai-profiles/${id}`, input);
+export const deleteAIProfile = async (id: number): Promise<ApiResponse> => del(`/ai-profiles/${id}`);
+export const replaceAIProfileItems = async (id: number, itemIds: string[]): Promise<ApiResponse> => put(`/ai-profiles/${id}/items`, { item_ids: itemIds });
+export const getAIForbiddenWords = async (): Promise<AIForbiddenWord[]> => get('/ai-forbidden-words');
+export const replaceAIForbiddenWords = async (rules: AIForbiddenWord[]): Promise<ApiResponse> => put('/ai-forbidden-words', { rules });
+
 // Accounts
 export const addAccount = async (id: string, value: string, loginMethod?: string): Promise<ApiResponse> => {
   return post('/cookies', { id, value, login_method: loginMethod });
+};
+
+export const importAccountFromCurl = async (curlCommand: string): Promise<ApiResponse & { id?: string }> => {
+  return post('/cookies/import-curl', { curl: curlCommand });
 };
 
 const accountAvatarURL = (item: any, version: string): string => {
@@ -211,7 +232,8 @@ export const updateAccountCookie = async (id: string, value: string, loginMethod
 };
 
 export interface AccountSettingsUpdate {
-  cookie?: string;
+  curl?: string;
+  cookie?: string; // legacy raw Cookie compatibility
   remark?: string;
   auto_confirm?: boolean;
   pause_duration?: number;

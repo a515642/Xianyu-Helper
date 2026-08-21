@@ -43,6 +43,16 @@ type ChatStore struct {
 	Dialect Dialect
 }
 
+// SessionItemID returns the account-scoped last known item for a conversation.
+func (s *ChatStore) SessionItemID(ctx context.Context, cookieID, chatID string) (string, error) {
+	var itemID string
+	err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(item_id,'') FROM chat_sessions WHERE cookie_id=? AND chat_id=?`, cookieID, chatID).Scan(&itemID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return itemID, err
+}
+
 func (s *ChatStore) UpsertSession(ctx context.Context, session ChatSession) error {
 	now := time.Now().UTC().Unix()
 	prefix := dialectInsertIgnorePrefix(s.Dialect)

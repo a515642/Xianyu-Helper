@@ -41,10 +41,14 @@ func TestHeadlessFingerprintBrowserIntegration(t *testing.T) {
 	}
 
 	t.Run("playwright-context", func(t *testing.T) {
+		executablePath, err := m.resolvedChromiumExecutablePath()
+		if err != nil {
+			t.Fatal(err)
+		}
 		browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 			Headless:       playwright.Bool(true),
 			Args:           chromiumLaunchArgs(),
-			ExecutablePath: chromiumExecutablePath(),
+			ExecutablePath: executablePath,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -64,10 +68,11 @@ func TestHeadlessFingerprintBrowserIntegration(t *testing.T) {
 
 	t.Run("direct-cdp-context", func(t *testing.T) {
 		profileDir := t.TempDir()
-		executable := m.pw.Chromium.ExecutablePath()
-		if configured := chromiumExecutablePath(); configured != nil {
-			executable = *configured
+		executablePath, err := m.resolvedChromiumExecutablePath()
+		if err != nil {
+			t.Fatal(err)
 		}
+		executable := *executablePath
 		cmd := exec.Command(executable, fallbackChromiumArgs(profileDir, true, userAgent)...)
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard

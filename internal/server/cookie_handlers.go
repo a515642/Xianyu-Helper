@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"xianyu-go/internal/auth"
+	"xianyu-go/internal/curlparser"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/engine"
 	"xianyu-go/internal/xianyu/cookierefresh"
@@ -24,6 +25,7 @@ func (s *Server) mountCookies(r chi.Router) {
 	r.Get("/cookies/details", s.listCookieDetails)
 	r.Get("/cookies/runtime-status", s.listCookieRuntimeStatus)
 	r.Post("/cookies", s.addCookie)
+	r.Post("/cookies/import-curl", s.importCookieFromCurl)
 	r.Put("/cookies/{cid}", s.updateCookie)
 	r.Put("/cookies/{cid}/login-info", s.updateCookieLoginInfo)
 	r.Put("/cookies/{cid}/settings", s.updateCookieSettings)
@@ -214,7 +216,8 @@ func scopedCookieHeader(detail *db.CookieDetail, requestURL string) string {
 }
 
 type updateCookieSettingsRequest struct {
-	Cookie        *string  `json:"cookie"`
+	Curl          *string  `json:"curl"`
+	Cookie        *string  `json:"cookie"` // 兼容旧客户端的原始 Cookie
 	Remark        *string  `json:"remark"`
 	AutoConfirm   *bool    `json:"auto_confirm"`
 	PauseDuration *int     `json:"pause_duration"`
@@ -237,7 +240,11 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if req.Cookie != nil && strings.TrimSpace(*req.Cookie) == "" {
+	if req.Curl != nil && strings.TrimSpace(*req.Curl) == "" {
+		writeErr(w, http.StatusBadRequest, "curl 命令不能为空")
+		return
+	}
+	if req.Curl == nil && req.Cookie != nil && strings.TrimSpace(*req.Cookie) == "" {
 		writeErr(w, http.StatusBadRequest, "Cookie 不能为空")
 		return
 	}
@@ -262,6 +269,19 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail = latestDetail
+	expectedAccountID := currentCredentialAccountID(cid, detail.Value)
+	var canonicalCookie *string
+	if req.Curl != nil {
+		canonicalCookie, err = canonicalCurlInput(expectedAccountID, req.Curl)
+	} else {
+		canonicalCookie, err = canonicalLegacyCookieInput(expectedAccountID, req.Cookie)
+	}
+	if err != nil {
+		credentialUnlock()
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Cookie = canonicalCookie
 
 	input := db.AccountSettingsUpdate{
 		UserID:        detail.UserID,
@@ -305,7 +325,7 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if req.Cookie != nil {
+	if canonicalCookie != nil {
 		// UpdateSettings 已在同一事务中写入 Cookie 并清除旧快照，不能再做
 		// 第二次非原子覆盖。
 		if s.Store.Tokens != nil {
@@ -474,6 +494,59 @@ func (s *Server) refreshCookieProfile(w http.ResponseWriter, r *http.Request) {
 		"avatar_url":    avatarURL,
 		"profile_error": profileErr,
 	})
+}
+
+// importCookieFromCurl 从浏览器复制的 curl 命令中提取 Cookie 并添加账号。
+// 这里只解析命令文本，不会执行 curl 或访问其中的 URL。
+func (s *Server) importCookieFromCurl(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Curl string `json:"curl"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	parsed, err := curlparser.Parse(req.Curl)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sess := auth.SessionFromContext(r.Context())
+	if sess == nil {
+		writeErr(w, http.StatusUnauthorized, "未授权访问")
+		return
+	}
+
+	credentialUnlock := s.Store.LockAccountCredentials(parsed.AccountID)
+	if err := s.Store.Cookies.CreateOwned(r.Context(), parsed.AccountID, parsed.RawCookie, sess.UserID); err != nil {
+		credentialUnlock()
+		switch {
+		case errors.Is(err, db.ErrForbidden):
+			writeErr(w, http.StatusForbidden, "该账号ID已存在且不属于当前用户")
+		case errors.Is(err, db.ErrAlreadyExists):
+			writeErr(w, http.StatusConflict, "该账号ID已存在，请使用重新授权或更新账号功能")
+		default:
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	if s.Store.Tokens != nil {
+		if err := s.Store.Tokens.Clear(r.Context(), parsed.AccountID); err != nil {
+			s.Logger.Warn("curl 导入账号后清理旧连接凭证失败", "cookie_id", parsed.AccountID, "err", err)
+		}
+	}
+	s.markSuccessfulLogin(r.Context(), parsed.AccountID, sess.UserID, loginMethodCurl, "curl 命令导入成功")
+	credentialUnlock()
+
+	if detail, err := s.Store.Cookies.GetDetails(r.Context(), parsed.AccountID); err == nil {
+		s.refreshAccountProfile(r.Context(), detail)
+	}
+	if s.Manager != nil && s.Store.Cookies.GetStatus(r.Context(), parsed.AccountID) {
+		if err := s.Manager.Restart(r.Context(), parsed.AccountID); err != nil {
+			s.Logger.Error("curl 导入账号后启动失败", "cookie_id", parsed.AccountID, "err", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": parsed.AccountID})
 }
 
 // addCookie 添加账号 cookie。

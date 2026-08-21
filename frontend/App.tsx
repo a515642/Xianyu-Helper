@@ -9,6 +9,7 @@ import Settings from './components/Settings';
 import Rules from './components/Rules';
 import Notifications from './components/Notifications';
 import Chat from './components/Chat';
+import AIAssistants from './components/AIAssistants';
 import { readSidebarCollapsed, writeSidebarCollapsed } from './components/sidebarState';
 import { YdisksBrandIcon } from './components/YdisksLogo';
 import { initializeAdmin, login, logout, verifySession } from './services/api';
@@ -33,6 +34,7 @@ const ROUTES: Record<string, string> = {
   '/app/rules': 'rules',
   '/app/notifications': 'notifications',
   '/app/settings': 'settings',
+  '/app/ai-assistants': 'ai-assistants',
 };
 const TAB_TO_PATH: Record<string, string> = Object.fromEntries(
   Object.entries(ROUTES).map(([path, tab]) => [tab, path])
@@ -338,6 +340,7 @@ const App: React.FC = () => {
       />;
       case 'notifications': return <Notifications isAdmin={isAdmin} />;
       case 'settings': return isAdmin ? <Settings /> : <Dashboard />;
+      case 'ai-assistants': return <AIAssistants isAdmin={isAdmin} />;
       default: return <Dashboard />;
     }
   };

@@ -14,9 +14,17 @@ import (
 
 // TestBuildSystemPrompt 自定义 prompt 替换变量，且始终追加价格与轮次安全约束。
 func TestBuildSystemPrompt(t *testing.T) {
-	got := buildSystemPrompt("你是卖{item_title}的客服，价格{item_price}", "iPhone", 100, "手机", 0, 0, 3, 1)
+	got := buildSystemPrompt("你是卖{item_title}的客服，价格{item_price}，保留{{unknown}}", "iPhone", 100, "手机", 0, 0, 3, 1)
+	got = buildSystemPrompt("你是卖{{item_title}}的客服，价格{{item_price}}，详情{{item_description}}", "iPhone", 100, "手机", 0, 0, 3, 1)
+	if !strings.Contains(got, "你是卖iPhone的客服，价格100.00，详情手机") {
+		t.Fatalf("双大括号 prompt 替换: got %q", got)
+	}
+	got = buildSystemPrompt("你是卖{item_title}的客服，价格{item_price}，保留{{unknown}}", "iPhone", 100, "手机", 0, 0, 3, 1)
 	if !strings.Contains(got, "你是卖iPhone的客服，价格100.00") {
 		t.Fatalf("自定义 prompt 替换: got %q", got)
+	}
+	if !strings.Contains(got, "{{unknown}}") {
+		t.Fatalf("未知模板变量应保持原样: got %q", got)
 	}
 	if !strings.Contains(got, "任一优惠上限为 0 时不得降价") || !strings.Contains(got, "当前砍价轮次 1") {
 		t.Fatalf("自定义 prompt 缺少安全约束: %q", got)
@@ -38,18 +46,16 @@ func TestBuildSystemPrompt(t *testing.T) {
 	}
 }
 
-func TestMinimumAllowedPriceAndUnsafeOffer(t *testing.T) {
-	if got := minimumAllowedPrice(100, 10, 20, true); got != 90 {
-		t.Fatalf("minimum=%v want 90", got)
-	}
-	if got := minimumAllowedPrice(100, 0, 20, true); got != 100 {
-		t.Fatalf("zero percent minimum=%v want 100", got)
-	}
-	if _, unsafe := unsafeOfferedPrice("最低可以 89 元", 90); !unsafe {
-		t.Fatal("低于最低价的报价应被拦截")
-	}
-	if _, unsafe := unsafeOfferedPrice("最低可以 90 元", 90); unsafe {
-		t.Fatal("边界报价应允许")
+func TestBargainStrategyDisabledUsesNormalAIReply(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv := mockOpenAIServer(t, 0, "普通回复")
+	id := enableTestAI(t, s, srv.URL, "no-bargain")
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=0 WHERE id=?`, id)
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("能便宜点吗", "item1", "chat-no-bargain"))
+	if err != nil || res == nil || res.Skip || res.Text != "普通回复" {
+		t.Fatalf("res=%+v err=%v", res, err)
 	}
 }
 
@@ -65,8 +71,27 @@ func newAIStore(t *testing.T) (*db.Store, func()) {
 	s.Users.Create(ctx, "admin", "a@e.com", "pw")
 	admin, _ := s.Users.GetByUsername(ctx, "admin")
 	s.Cookies.Save(ctx, "cid", "unb=1; _m_h5_tk=tk;", admin.ID)
+	s.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,item_price,item_description) VALUES ('cid','item1','测试商品','100','测试描述')`)
 	return s, func() { d.Close() }
 }
+
+func enableTestAI(t *testing.T, s *db.Store, baseURL string, profileName string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	id, err := s.AIProfiles.Create(ctx, db.AIProfile{CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AIProfiles.Update(ctx, db.AIProfile{ID: id, CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, BaseURL: baseURL, BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1}, strPtr("sk-test"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AIProfiles.ReplaceItems(ctx, id, "cid", []string{"item1"}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func strPtr(value string) *string { return &value }
 
 // TestAIReply_DisabledReturnsNil AI 未启用 / 无 APIKey 时应返回 nil,nil（降级到下一级）。
 func TestAIReply_DisabledReturnsNil(t *testing.T) {
@@ -82,7 +107,7 @@ func TestAIReply_DisabledReturnsNil(t *testing.T) {
 	}
 
 	// 配置但 ai_enabled=0 → nil。
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 0, '')`)
+	// No product AI profile is bound, so the new product-scoped path is disabled.
 	res, err = a.Reply(ctx, chatMsg("在吗", "item1", "chat1"))
 	if err != nil || res != nil {
 		t.Fatalf("未启用应返回 nil,nil: res=%+v err=%v", res, err)
@@ -94,7 +119,13 @@ func TestAIReply_NoAPIKeyReturnsNil(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()
 	ctx := context.Background()
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
+	id, err := s.AIProfiles.Create(ctx, db.AIProfile{CookieID: "cid", Name: "test-ai", Enabled: true, UseSystemAPI: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AIProfiles.ReplaceItems(ctx, id, "cid", []string{"item1"}); err != nil {
+		t.Fatal(err)
+	}
 	a := NewAIReplier("cid", s, nil)
 
 	res, err := a.Reply(ctx, chatMsg("能便宜点吗", "item1", "chat1"))
@@ -131,10 +162,9 @@ func TestAIReply_HTTPErrorDegrades(t *testing.T) {
 	ctx := context.Background()
 	srv := mockOpenAIServer(t, http.StatusInternalServerError, "")
 
-	// 启用 AI + 配 APIKey + 指向 mock 服务。
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
-	s.Settings.Set(ctx, "ai_api_key", "sk-test")
-	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+	// 启用商品 AI + 配 APIKey + 指向 mock 服务。
+	id := enableTestAI(t, s, srv.URL, "error-ai")
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=1 WHERE id=?`, id)
 
 	a := NewAIReplier("cid", s, nil)
 	res, err := a.Reply(ctx, chatMsg("还能优惠吗", "item1", "chat1"))
@@ -160,9 +190,8 @@ func TestAIReply_EmptyChoicesReturnsNil(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{}})
 	}))
 	t.Cleanup(srv.Close)
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
-	s.Settings.Set(ctx, "ai_api_key", "sk-test")
-	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+	id := enableTestAI(t, s, srv.URL, "test-ai")
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=1 WHERE id=?`, id)
 
 	a := NewAIReplier("cid", s, nil)
 	res, err := a.Reply(ctx, chatMsg("可以便宜一点吗", "item1", "chat1"))
@@ -177,9 +206,8 @@ func TestAIReply_SuccessReturnsContent(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	srv := mockOpenAIServer(t, 0, "你好，在的哦")
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
-	s.Settings.Set(ctx, "ai_api_key", "sk-test")
-	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+	id := enableTestAI(t, s, srv.URL, "test-ai")
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=1 WHERE id=?`, id)
 
 	a := NewAIReplier("cid", s, nil)
 	res, err := a.Reply(ctx, chatMsg("最低多少钱", "item1", "chat1"))
@@ -191,17 +219,93 @@ func TestAIReply_SuccessReturnsContent(t *testing.T) {
 	}
 }
 
-func TestAIReply_NonBargainMessageFallsThrough(t *testing.T) {
+func TestAIReply_ThinkingModeDoesNotForceFunctionToolChoice(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()
 	ctx := context.Background()
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
-	s.Settings.Set(ctx, "ai_api_key", "sk-test")
-	s.Settings.Set(ctx, "ai_api_url", "http://127.0.0.1:1")
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"message": map[string]any{"role": "assistant", "content": "思考模式回复"},
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	id := enableTestAI(t, s, srv.URL, "thinking-tool-ai")
+	_, err := s.DB.ExecContext(ctx, `UPDATE ai_profiles SET thinking_mode='enabled' WHERE id=?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("在吗，什么时候发货", "item1", "chat1"))
+	replier := NewAIReplier("cid", s, nil)
+	replier.SetOrderPriceAdjuster(&diagnosticPriceAdjuster{})
+	result, err := replier.Reply(ctx, chatMsg("可以便宜吗", "item1", "thinking-tool-chat"))
+	if err != nil || result == nil || result.Text != "思考模式回复" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, ok := requestBody["tool_choice"]; ok {
+		t.Fatalf("thinking mode must not force function tool_choice: %#v", requestBody["tool_choice"])
+	}
+	tools, ok := requestBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("thinking mode should retain the price tool: %#v", requestBody["tools"])
+	}
+}
+
+func TestAIReply_NonBargainBoundItemAndForbiddenWords(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv := mockOpenAIServer(t, 0, "可以加微信沟通")
+	profileID := enableTestAI(t, s, srv.URL, "general-ai")
+	if err := s.AIProfiles.ReplaceForbiddenWords(ctx, []db.AIForbiddenWord{{Keyword: "微信", Replacement: "站内", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("在吗，什么时候发货", "item1", "chat-general"))
+	if err != nil || res == nil || res.Text != "可以加站内沟通" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-general", "item1", 10)
+	if err != nil || len(history) != 2 || history[1].Content != res.Text {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+func TestAIReplyExitPersistsContextWithoutSending(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv := mockOpenAIServer(t, 0, "无需回复 <exit>")
+	profileID := enableTestAI(t, s, srv.URL, "silent-ai")
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("谢谢", "item1", "chat-silent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || !res.Skip || res.Text != "" {
+		t.Fatalf("silent result=%+v", res)
+	}
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-silent", "item1", 10)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	if history[1].Content != "无需回复 <exit>" || history[1].Intent != "silent_exit" {
+		t.Fatalf("assistant history=%+v", history[1])
+	}
+}
+
+func TestAIReply_UnboundItemFallsThrough(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("在吗，什么时候发货", "unbound-item", "chat1"))
 	if err != nil || res != nil {
-		t.Fatalf("非砍价消息应交给默认回复: res=%+v err=%v", res, err)
+		t.Fatalf("未绑定商品应交给默认回复: res=%+v err=%v", res, err)
 	}
 }
 
@@ -244,8 +348,8 @@ func TestAIReplierItemInfo(t *testing.T) {
 		t.Fatalf("缺失商品应兜底: title=%q price=%v desc=%q", title, price, desc)
 	}
 
-	// 插入商品。
-	s.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id, item_id, item_title, item_price, item_description, item_detail) VALUES ('cid','item1','会员卡','9.90','用户编辑描述','原始详情')`)
+	// 更新商品。
+	s.DB.ExecContext(ctx, `UPDATE item_info SET item_title='会员卡',item_price='9.90',item_description='用户编辑描述',item_detail='原始详情' WHERE cookie_id='cid' AND item_id='item1'`)
 	title, price, desc = a.itemInfo(ctx, "item1")
 	if title != "会员卡" || price != 9.9 || desc != "用户编辑描述" {
 		t.Fatalf("真实商品: title=%q price=%v desc=%q", title, price, desc)
@@ -257,34 +361,31 @@ func TestAIReplyTracksBargainRoundsAndBlocksUnsafePrice(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	srv := mockOpenAIServer(t, 0, "可以，80 元成交")
-	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings
-		(cookie_id,ai_enabled,max_discount_percent,max_discount_amount,max_bargain_rounds,custom_prompts)
-		VALUES ('cid',1,10,20,1,'')`)
-	s.DB.ExecContext(ctx, `INSERT INTO item_info
-		(cookie_id,item_id,item_title,item_price,item_description) VALUES ('cid','item1','商品','100','描述')`)
-	s.Settings.Set(ctx, "ai_api_key", "sk-test")
-	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+	s.DB.ExecContext(ctx, `UPDATE item_info SET item_title='商品',item_price='100',item_description='描述' WHERE cookie_id='cid' AND item_id='item1'`)
+	profileID := enableTestAI(t, s, srv.URL, "bargain-ai")
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=0 WHERE id=?`, profileID)
+	_, _ = s.DB.ExecContext(ctx, `UPDATE ai_profiles SET bargain_strategy_enabled=1 WHERE id=?`, profileID)
 
 	a := NewAIReplier("cid", s, nil)
 	first, err := a.Reply(ctx, chatMsg("能便宜点吗", "item1", "chat1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first == nil || !strings.Contains(first.Text, "90.00 元") {
-		t.Fatalf("越界报价应替换成安全价格: %+v", first)
+	if first == nil || first.Text != "可以，80 元成交" {
+		t.Fatalf("开启策略时应保留模型原始文本: %+v", first)
 	}
 	second, err := a.Reply(ctx, chatMsg("再便宜一点", "item1", "chat1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second == nil || !strings.Contains(second.Text, "已经是最低价") {
-		t.Fatalf("超过最大轮次应拒绝继续降价: %+v", second)
+	if second == nil || second.Text != "可以，80 元成交" {
+		t.Fatalf("策略开启时应由模型决定回复: %+v", second)
 	}
-	count, err := s.AIReply.CurrentBargainCount(ctx, "cid", "chat1", "item1")
-	if err != nil || count != 2 {
-		t.Fatalf("bargain count=%d err=%v want 2", count, err)
+	count, err := s.AIReply.ProfileBargainCount(ctx, profileID, "cid", "chat1", "item1")
+	if err != nil || count != 0 {
+		t.Fatalf("不再由正则统计 bargain count=%d err=%v", count, err)
 	}
-	history, err := s.AIReply.ConversationHistory(ctx, "cid", "chat1", "item1", 10)
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat1", "item1", 10)
 	if err != nil || len(history) != 4 {
 		t.Fatalf("history len=%d err=%v", len(history), err)
 	}

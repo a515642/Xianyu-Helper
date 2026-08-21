@@ -343,6 +343,45 @@ func TestUpdateCookieSettingsAtomically(t *testing.T) {
 	}
 }
 
+func TestUpdateCookieSettingsAcceptsCurlForCurrentCredential(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	h := srv.Router()
+	authCookie := loginHelper(t, h)
+	body, _ := json.Marshal(map[string]string{"curl": `curl.exe "https://example.com" -H "Cookie: unb=123; _m_h5_tk=new_1; cookie2=fresh"`})
+	req := httptest.NewRequest(http.MethodPut, "/cookies/acc1/settings", strings.NewReader(string(body)))
+	req.AddCookie(authCookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	detail, err := store.Cookies.GetDetails(context.Background(), "acc1")
+	if err != nil || detail.Value != "unb=123; _m_h5_tk=new_1; cookie2=fresh" {
+		t.Fatalf("detail=%+v err=%v", detail, err)
+	}
+}
+
+func TestUpdateCookieSettingsRejectsCurlForDifferentCredential(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	h := srv.Router()
+	authCookie := loginHelper(t, h)
+	before, _ := store.Cookies.GetValue(context.Background(), "acc1")
+	body, _ := json.Marshal(map[string]string{"curl": `curl.exe "https://example.com" -H "Cookie: unb=other; _m_h5_tk=new_1"`})
+	req := httptest.NewRequest(http.MethodPut, "/cookies/acc1/settings", strings.NewReader(string(body)))
+	req.AddCookie(authCookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	after, _ := store.Cookies.GetValue(context.Background(), "acc1")
+	if after != before {
+		t.Fatalf("credential changed after mismatch: before=%q after=%q", before, after)
+	}
+}
+
 func TestUpdateCookieSettingsClearsTokenButKeepsDeviceID(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()

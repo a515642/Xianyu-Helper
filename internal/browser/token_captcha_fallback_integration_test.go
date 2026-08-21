@@ -55,9 +55,14 @@ slider.addEventListener('click', event => {
 	if err := m.init(); err != nil {
 		t.Fatal(err)
 	}
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
-		Args:     chromiumLaunchArgs(),
+		Headless:       playwright.Bool(true),
+		Args:           chromiumLaunchArgs(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +143,14 @@ document.addEventListener('click', event => {
 	if err := m.init(); err != nil {
 		t.Fatal(err)
 	}
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
-		Args:     chromiumLaunchArgs(),
+		Headless:       playwright.Bool(true),
+		Args:           chromiumLaunchArgs(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -187,9 +197,14 @@ func TestTokenCaptchaDirectErrorPageBrowserIntegration(t *testing.T) {
 	if err := m.init(); err != nil {
 		t.Fatal(err)
 	}
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
-		Args:     chromiumLaunchArgs(),
+		Headless:       playwright.Bool(true),
+		Args:           chromiumLaunchArgs(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		t.Fatal(err)

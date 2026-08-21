@@ -7,6 +7,7 @@ import {
   completeQRVerification,
   createNotificationChannel,
   getAccountDetails,
+  getAIProfiles,
 	getCards,
 	getAutomationIssues,
   getItems,
@@ -38,6 +39,7 @@ import {
 	getChatSessions,
 	getChatMessages,
 	sendChatMessage,
+	sendChatImage,
 	markChatRead,
 	updateAccountTaskSettings,
 	runAccountTask,
@@ -66,11 +68,18 @@ test('chat APIs preserve account and conversation scope', async () => {
 	await getChatSessions('a1');
 	await getChatMessages('a1', 'c1', 9);
 	await sendChatMessage({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1', text: 'hi' });
+	const image = new File(['png'], 'paste.png', { type: 'image/png' });
+	await sendChatImage({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1', image });
 	await markChatRead('a1', 'c1');
 	expect(fetchMock.mock.calls[0][0]).toBe('/api/chat/sessions?account_id=a1');
 	expect(fetchMock.mock.calls[1][0]).toBe('/api/chat/messages?account_id=a1&chat_id=c1&before_id=9');
 	expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({ account_id: 'a1', chat_id: 'c1', buyer_id: 'b1' });
-	expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({ account_id: 'a1', chat_id: 'c1', message_ids: [] });
+	expect(fetchMock.mock.calls[3][0]).toBe('/api/chat/images');
+	expect(fetchMock.mock.calls[3][1].body).toBeInstanceOf(FormData);
+	expect((fetchMock.mock.calls[3][1].body as FormData).get('image')).toBe(image);
+	expect((fetchMock.mock.calls[3][1].body as FormData).get('account_id')).toBe('a1');
+	expect(fetchMock.mock.calls[4][0]).toBe('/api/chat/read');
+	expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ account_id: 'a1', chat_id: 'c1', message_ids: [] });
 });
 
 test('account task APIs keep rating and polish account-scoped', async () => {
@@ -97,6 +106,18 @@ test('getItemPublishBatches unwraps persisted batch list', async () => {
 test('getCards treats an empty backend response as an empty list', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(null)));
 	await expect(getCards()).resolves.toEqual([]);
+});
+
+test('getAIProfiles normalizes legacy null item bindings', async () => {
+	const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
+		{ id: 1, name: '旧配置', item_ids: null },
+		{ id: 2, name: '新配置', item_ids: ['item-2'] },
+	]));
+	vi.stubGlobal('fetch', fetchMock);
+	await expect(getAIProfiles('acc-1')).resolves.toEqual([
+		{ id: 1, name: '旧配置', item_ids: [] },
+		{ id: 2, name: '新配置', item_ids: ['item-2'] },
+	]);
 });
 
 test('automation issue APIs expose and resolve quarantined work', async () => {
@@ -347,12 +368,14 @@ test('account editor settings use one aggregate request', async () => {
 	const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true }));
 	vi.stubGlobal('fetch', fetchMock);
 	await updateAccountSettings('acc1', {
+	  curl: 'curl.exe "https://example.com" -H "Cookie: unb=acc1; _m_h5_tk=token_1"',
 	  remark: 'main', auto_confirm: false, pause_duration: 5,
 	  username: 'user', show_browser: true, channel_ids: [1, 2],
 	});
 	expect(fetchMock).toHaveBeenCalledTimes(1);
 	expect(fetchMock).toHaveBeenCalledWith('/cookies/acc1/settings', expect.objectContaining({ method: 'PUT' }));
 	expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+	  curl: 'curl.exe "https://example.com" -H "Cookie: unb=acc1; _m_h5_tk=token_1"',
 	  remark: 'main', auto_confirm: false, pause_duration: 5,
 	  username: 'user', show_browser: true, channel_ids: [1, 2],
 	});

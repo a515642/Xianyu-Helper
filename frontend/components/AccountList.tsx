@@ -22,6 +22,7 @@ import {
   getAccountBindings,
   getLongLoginSettings,
   setLongLoginSettings,
+  importAccountFromCurl,
 } from '../services/api';
 import { shouldUpdateAccountPause } from './accountPause';
 import {
@@ -48,6 +49,10 @@ const AccountList: React.FC = () => {
   const [deleteDialogAccount, setDeleteDialogAccount] = useState<AccountDetail | null>(null);
   const [deleteError, setDeleteError] = useState('');
   const [showQRModal, setShowQRModal] = useState(false);
+  const [showCurlModal, setShowCurlModal] = useState(false);
+  const [curlCommand, setCurlCommand] = useState('');
+  const [curlImporting, setCurlImporting] = useState(false);
+  const [curlImportError, setCurlImportError] = useState('');
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [qrStatus, setQrStatus] = useState<string>('pending');
   const [qrErrorMessage, setQrErrorMessage] = useState<string>('');
@@ -134,6 +139,36 @@ const AccountList: React.FC = () => {
 
   const stopQRPolling = () => {
     qrPollerRef.current?.stop();
+  };
+
+  const closeCurlModal = () => {
+    if (curlImporting) return;
+    setShowCurlModal(false);
+    setCurlCommand('');
+    setCurlImportError('');
+  };
+
+  const submitCurlImport = async () => {
+    if (curlImporting) return;
+    if (!curlCommand.trim()) {
+      setCurlImportError('请粘贴 curl 命令');
+      return;
+    }
+    setCurlImporting(true);
+    setCurlImportError('');
+    try {
+      const result = await importAccountFromCurl(curlCommand);
+      if (!result.success || !result.id) {
+        throw new Error(result.message || '导入账号失败');
+      }
+      setShowCurlModal(false);
+      setCurlCommand('');
+      await loadAccounts();
+    } catch (error: any) {
+      setCurlImportError(error?.message || '导入账号失败，请检查 curl 命令');
+    } finally {
+      setCurlImporting(false);
+    }
   };
 
   const closeQRModal = () => {
@@ -353,7 +388,7 @@ const AccountList: React.FC = () => {
       auto_confirm: account.auto_confirm || false,
       pause_duration: account.pause_duration || 0,
       username: account.username || '',
-      login_password: account.login_password || '',
+      login_password: '',
       show_browser: account.show_browser || false,
       showLoginPassword: false,
       clear_password: false,
@@ -420,9 +455,9 @@ const AccountList: React.FC = () => {
 		payload.remark = editForm.remark;
       }
 
-      // 更新Cookie
-      if (editForm.cookie && editForm.cookie !== (editingAccount.cookie || editingAccount.value || '')) {
-		payload.cookie = editForm.cookie;
+      // 使用 curl 更新 Cookie；留空表示不修改当前凭证。
+      if (editForm.cookie.trim()) {
+		payload.curl = editForm.cookie;
       }
 
       // 更新自动确认
@@ -715,13 +750,22 @@ const AccountList: React.FC = () => {
             placeholder="搜索昵称 / 备注 / 账号ID"
             className="ios-input px-4 py-3 rounded-2xl text-sm w-full sm:w-72"
           />
-          <button
-            onClick={() => startQRLogin()}
-            className="ios-btn-primary flex items-center gap-2 px-6 py-3 rounded-2xl font-bold shadow-lg shadow-blue-200 transition-transform hover:scale-105 active:scale-95"
-          >
-            <QrCode className="w-5 h-5" />
-            扫码添加新账号
-          </button>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button
+              onClick={() => startQRLogin()}
+              className="ios-btn-primary flex items-center gap-2 px-6 py-3 rounded-2xl font-bold shadow-lg shadow-blue-200 transition-transform hover:scale-105 active:scale-95"
+            >
+              <QrCode className="w-5 h-5" />
+              扫码添加新账号
+            </button>
+            <button
+              onClick={() => { setCurlImportError(''); setShowCurlModal(true); }}
+              className="ios-btn-secondary flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-transform hover:scale-105 active:scale-95"
+            >
+              <Upload className="w-5 h-5" />
+              导入 curl
+            </button>
+          </div>
         </div>
       </div>
 
@@ -826,13 +870,6 @@ const AccountList: React.FC = () => {
                     title="编辑账号"
                 >
                     <Edit2 className="w-5 h-5" />
-                </button>
-                <button
-                    onClick={() => openAIModal(account)}
-                    className="p-3 rounded-xl hover:bg-purple-100 transition-colors text-purple-600"
-                    title="AI设置"
-                >
-                    <Bot className="w-5 h-5" />
                 </button>
                 <button
                     onClick={() => setTaskAccount(account)}
@@ -1001,6 +1038,62 @@ const AccountList: React.FC = () => {
         document.body
       )}
 
+      {/* Curl Import Modal */}
+      {showCurlModal && createPortal(
+        <div className="modal-overlay-centered">
+          <div className="modal-container relative" style={{ maxWidth: '42rem' }}>
+            <button
+              onClick={closeCurlModal}
+              className="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded-full transition-colors disabled:opacity-50"
+              disabled={curlImporting}
+            >
+              <X className="w-5 h-5 text-gray-600" />
+            </button>
+            <div className="modal-header">
+              <div>
+                <h3 className="text-2xl font-extrabold text-gray-900">从 curl 导入账号</h3>
+                <p className="text-sm text-gray-500 mt-1">粘贴浏览器开发者工具复制的 curl 命令，系统只解析其中的 Cookie。</p>
+              </div>
+            </div>
+            <div className="modal-body space-y-4">
+              <textarea
+                value={curlCommand}
+                onChange={event => setCurlCommand(event.target.value)}
+                placeholder={'curl.exe "https://..." ^\n  -H "Cookie: unb=...; _m_h5_tk=..."'}
+                className="w-full ios-input px-4 py-3 rounded-xl h-56 resize-y font-mono text-xs"
+                disabled={curlImporting}
+                autoFocus
+              />
+              <div className="rounded-xl bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800">
+                <p className="font-bold">安全提示</p>
+                <p>curl 命令含有登录 Cookie，请不要分享给他人。导入后账号 ID 会从 Cookie 的 unb 字段读取。</p>
+              </div>
+              {curlImportError && <p className="text-sm font-bold text-red-600">{curlImportError}</p>}
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={closeCurlModal}
+                  disabled={curlImporting}
+                  className="px-5 py-3 rounded-xl bg-gray-100 text-gray-700 font-bold hover:bg-gray-200 disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitCurlImport()}
+                  disabled={curlImporting}
+                  className="ios-btn-primary px-5 py-3 rounded-xl font-bold disabled:opacity-50 flex items-center gap-2"
+                >
+                  {curlImporting && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {curlImporting ? '导入中...' : '导入账号'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {/* QR Code Modal */}
       {showQRModal && createPortal(
           <div className="modal-overlay-centered">
@@ -1057,14 +1150,16 @@ const AccountList: React.FC = () => {
       {activeModal === 'edit' && editingAccount && createPortal(
         <div className="modal-overlay-centered">
           <div className="modal-container" style={{maxWidth: '600px'}}>
-            <div className="modal-header">
-              <div>
+            <div className="modal-header flex items-center justify-between gap-4">
+              <div className="min-w-0">
                 <h3 className="text-2xl font-extrabold text-gray-900">编辑账号</h3>
                 <p className="text-sm text-gray-500 mt-1">{editingAccount.nickname || editingAccount.remark || editingAccount.id}</p>
               </div>
               <button
 				onClick={() => void closeEditModal()}
-                className="p-2 rounded-xl hover:bg-gray-100 transition-colors flex-shrink-0"
+                type="button"
+                aria-label="关闭弹窗"
+                className="shrink-0 rounded-xl p-2 hover:bg-gray-100 transition-colors"
               >
                 <X className="w-5 h-5 text-gray-500" />
               </button>
@@ -1094,16 +1189,16 @@ const AccountList: React.FC = () => {
                 />
               </div>
 
-              {/* Cookie */}
+              {/* curl 命令 */}
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">Cookie</label>
+                <label className="block text-sm font-bold text-gray-700 mb-2">curl 命令</label>
                 <textarea
                   value={editForm.cookie}
                   onChange={(e) => setEditForm({ ...editForm, cookie: e.target.value })}
-                  placeholder="更新账号Cookie"
+                  placeholder={'粘贴浏览器开发者工具复制的 curl 命令，例如：\ncurl.exe "https://..." -H "Cookie: unb=...; _m_h5_tk=..."'}
                   className="w-full ios-input px-4 py-3 rounded-xl h-32 resize-none font-mono text-xs"
                 />
-                <p className="text-xs text-gray-500 mt-1">当前Cookie长度: {editForm.cookie.length} 字符</p>
+                <p className="text-xs text-gray-500 mt-1">已输入 curl 命令长度: {editForm.cookie.length} 字符；留空表示不修改当前凭证</p>
               </div>
 
               {/* 自动确认发货 */}
@@ -1355,8 +1450,8 @@ const AccountList: React.FC = () => {
       {activeModal === 'ai-settings' && editingAccount && createPortal(
         <div className="modal-overlay-centered">
           <div className="modal-container" style={{maxWidth: '600px'}}>
-            <div className="modal-header">
-              <div>
+            <div className="modal-header flex items-center justify-between gap-4">
+              <div className="min-w-0">
                 <h3 className="text-2xl font-extrabold text-gray-900 flex items-center gap-2">
                   <Bot className="w-6 h-6 text-purple-500" />
                   AI助手设置
@@ -1365,7 +1460,9 @@ const AccountList: React.FC = () => {
               </div>
               <button
 				onClick={closeAIModal}
-                className="p-2 rounded-xl hover:bg-gray-100 transition-colors flex-shrink-0"
+                type="button"
+                aria-label="关闭弹窗"
+                className="shrink-0 rounded-xl p-2 hover:bg-gray-100 transition-colors"
               >
                 <X className="w-5 h-5 text-gray-500" />
               </button>

@@ -21,6 +21,10 @@ func (m *Manager) QRCookieRefresh(ctx context.Context, tmpCookies, verificationU
 	if err := m.init(); err != nil {
 		return "", "", err
 	}
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		return "", "", err
+	}
 
 	m.logger.Info("开始用临时 cookie 换取真实 cookie", "tmp_cookie_count", len(parseCookieStr(tmpCookies)))
 
@@ -28,7 +32,7 @@ func (m *Manager) QRCookieRefresh(ctx context.Context, tmpCookies, verificationU
 	browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless:       playwright.Bool(true),
 		Args:           chromiumLaunchArgs(),
-		ExecutablePath: chromiumExecutablePath(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("启动 chromium 失败: %w", err)

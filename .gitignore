@@ -44,8 +44,11 @@
 !/internal/webui/static/assets/*.svg
 /internal/webui/static/assets/*.map
 
+# Reference repositories (local-only; never commit)
+/references/
+
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
-.docker
+.playwright-mcp/

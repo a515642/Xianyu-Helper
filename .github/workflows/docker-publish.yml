@@ -213,12 +213,26 @@ jobs:
 
           docker run --rm --entrypoint sh "$image_ref" -ec '
             chromium_path="$(find /ms-playwright/chromium-* -type f \
-              -name chrome -perm -111 -print -quit)"
+              -path "*/chrome-linux*/chrome" -perm -111 -print -quit)"
             test -n "$chromium_path"
             timeout 45 "$chromium_path" \
               --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
               --dump-dom about:blank | grep -q "<html"
           '
+
+          browser_test_image="${IMAGE_NAME}-browser-test:${GITHUB_SHA}"
+          docker build \
+            --build-arg "BROWSER_TEST_IMAGE=$image_ref" \
+            -f Dockerfile.browser-test \
+            -t "$browser_test_image" .
+          docker run --rm \
+            -e RUN_BROWSER_INTEGRATION=1 \
+            -e BROWSER_HEADLESS=true \
+            -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+            "$browser_test_image" \
+            go test -timeout=2m ./internal/browser \
+              -run 'TestHeadlessFingerprintBrowserIntegration|TestTokenCaptchaCDPFallbackBrowserIntegration' \
+              -v -count=1
 
           container_id="$(docker run -d -p 127.0.0.1::59188 "$image_ref")"
           cleanup() {
