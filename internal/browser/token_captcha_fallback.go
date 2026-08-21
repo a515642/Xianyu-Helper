@@ -45,13 +45,11 @@ func (m *Manager) tokenCaptchaCDPFallback(ctx context.Context, cookieID, cookieS
 	cleanSingletonFiles(profileDir)
 	_ = os.Remove(filepath.Join(profileDir, "DevToolsActivePort"))
 
-	executable := m.pw.Chromium.ExecutablePath()
-	if configured := chromiumExecutablePath(); configured != nil {
-		executable = *configured
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		return "", fmt.Errorf("备用滑块引擎未找到 Chromium: %w", err)
 	}
-	if strings.TrimSpace(executable) == "" {
-		return "", fmt.Errorf("备用滑块引擎未找到 Chromium")
-	}
+	executable := *executablePath
 	args := fallbackChromiumArgs(profileDir, headless, m.headlessUserAgent())
 	cmd := exec.Command(executable, args...)
 	cmd.Stdout = io.Discard

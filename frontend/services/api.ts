@@ -47,7 +47,15 @@ export const updateLoginCredentials = async (data: {
 };
 
 // Product-scoped AI assistants
-export const getAIProfiles = async (cookieId: string): Promise<AIProfile[]> => get('/ai-profiles', { cookie_id: cookieId });
+const normalizeAIProfile = (profile: AIProfile): AIProfile => ({
+  ...profile,
+  item_ids: Array.isArray(profile.item_ids) ? profile.item_ids : [],
+});
+
+export const getAIProfiles = async (cookieId: string): Promise<AIProfile[]> => {
+  const profiles = await get<AIProfile[]>('/ai-profiles', { cookie_id: cookieId });
+  return (Array.isArray(profiles) ? profiles : []).map(normalizeAIProfile);
+};
 export const createAIProfile = async (input: AIProfileInput): Promise<AIProfile> => post('/ai-profiles', input);
 export const updateAIProfile = async (id: number, input: Partial<AIProfileInput>): Promise<AIProfile> => put(`/ai-profiles/${id}`, input);
 export const deleteAIProfile = async (id: number): Promise<ApiResponse> => del(`/ai-profiles/${id}`);

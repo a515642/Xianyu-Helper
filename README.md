@@ -470,6 +470,8 @@ curl -fsS http://127.0.0.1:59188/health
 docker compose logs --tail=200 app
 ```
 
+生产 Compose 的 app 默认启用无头 Chromium 与 Playwright，并使用镜像内的完整 Chromium；如目标环境的 Chromium 无法启动，可临时追加 `-no-browser` 运行管理服务，但本地浏览器指纹与滑块自动处理会不可用。
+
 健康接口正常时返回（构建信息会随运行方式变化）：
 
 ```json

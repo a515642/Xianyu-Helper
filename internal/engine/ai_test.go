@@ -219,6 +219,44 @@ func TestAIReply_SuccessReturnsContent(t *testing.T) {
 	}
 }
 
+func TestAIReply_ThinkingModeDoesNotForceFunctionToolChoice(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"message": map[string]any{"role": "assistant", "content": "思考模式回复"},
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	id := enableTestAI(t, s, srv.URL, "thinking-tool-ai")
+	_, err := s.DB.ExecContext(ctx, `UPDATE ai_profiles SET thinking_mode='enabled' WHERE id=?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replier := NewAIReplier("cid", s, nil)
+	replier.SetOrderPriceAdjuster(&diagnosticPriceAdjuster{})
+	result, err := replier.Reply(ctx, chatMsg("可以便宜吗", "item1", "thinking-tool-chat"))
+	if err != nil || result == nil || result.Text != "思考模式回复" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, ok := requestBody["tool_choice"]; ok {
+		t.Fatalf("thinking mode must not force function tool_choice: %#v", requestBody["tool_choice"])
+	}
+	tools, ok := requestBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("thinking mode should retain the price tool: %#v", requestBody["tools"])
+	}
+}
+
 func TestAIReply_NonBargainBoundItemAndForbiddenWords(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()

@@ -69,6 +69,29 @@ func chromiumExecutablePath() *string {
 	return nil
 }
 
+// resolvedChromiumExecutablePath keeps every browser launch on the same full
+// Chromium executable. Playwright otherwise selects chromium-headless-shell
+// when Headless is true, which is not supported by every packaged runtime.
+func (m *Manager) resolvedChromiumExecutablePath() (*string, error) {
+	if configured := chromiumExecutablePath(); configured != nil {
+		if _, err := os.Stat(*configured); err != nil {
+			return nil, fmt.Errorf("配置的 Chromium 路径不可用: %w", err)
+		}
+		return configured, nil
+	}
+	if m == nil || m.pw == nil {
+		return nil, fmt.Errorf("Playwright 尚未启动")
+	}
+	path := strings.TrimSpace(m.pw.Chromium.ExecutablePath())
+	if path == "" {
+		return nil, fmt.Errorf("Playwright 未返回 Chromium 可执行文件路径")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("Playwright Chromium 路径不可用: %w", err)
+	}
+	return playwright.String(path), nil
+}
+
 func skipPlaywrightBrowserDownload() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"))) {
 	case "1", "true", "yes", "on":
@@ -251,6 +274,10 @@ func (m *Manager) init() error {
 func (m *Manager) Initialize() error { return m.init() }
 
 func (m *Manager) detectBrowserFingerprint() error {
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		return err
+	}
 	observed := make(chan http.Header, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		observed <- r.Header.Clone()
@@ -262,7 +289,7 @@ func (m *Manager) detectBrowserFingerprint() error {
 	b, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless:       playwright.Bool(true),
 		Args:           chromiumLaunchArgs(),
-		ExecutablePath: chromiumExecutablePath(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		return err
@@ -583,10 +610,14 @@ func (m *Manager) releaseEntry(cookieID string, entry *poolEntry) {
 }
 
 func (m *Manager) createEntry(cookieID, cookieStr string, headless bool) (*poolEntry, error) {
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		return nil, err
+	}
 	browser, err := m.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless:       playwright.Bool(headless),
 		Args:           chromiumLaunchArgs(),
-		ExecutablePath: chromiumExecutablePath(),
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("启动 chromium 失败: %w", err)

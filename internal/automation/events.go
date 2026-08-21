@@ -7,7 +7,9 @@
 package automation
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"html"
 	"net/url"
 	"regexp"
 	"strings"
@@ -127,7 +129,7 @@ func fieldsFromRaw(raw map[string]any) rawFields {
 			f.updateKey, f.contentType = extFields(strAny(m10["extJson"]))
 			f.orderRole = orderRoleFromTaskName(bizTaskName(strAny(m10["bizTag"])))
 		}
-		if contentJSON := nestedString(raw, "1", "6", "3", "5"); contentJSON != "" {
+		for _, contentJSON := range cardJSONCandidates(raw) {
 			if role := extractOrderRoleFromContent(contentJSON); role != "" {
 				f.orderRole = role
 			}
@@ -291,27 +293,30 @@ func trimGoofishSID(s string) string {
 }
 
 var orderIDPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`orderId[=:](\d{10,})`),
+	regexp.MustCompile(`(?:[?&]|^)orderId[=:](\d{10,})`),
 	regexp.MustCompile(`order_detail\?id=(\d{10,})`),
-	regexp.MustCompile(`bizOrderId[=:](\d{10,})`),
-	regexp.MustCompile(`id=(\d{10,})`),
+	regexp.MustCompile(`(?:[?&]|^)bizOrderId[=:](\d{10,})`),
+	regexp.MustCompile(`(?:[?&])id=(\d{10,})`),
+	regexp.MustCompile(`order_detail[^\s"']*id[=:](\d{10,})`),
 }
 
 func extractOrderRoleFromContent(contentJSON string) string {
-	var c map[string]any
+	var c any
 	if json.Unmarshal([]byte(contentJSON), &c) != nil {
 		return ""
 	}
-	for _, path := range [][]string{
-		{"dxCard", "item", "main", "exContent", "button", "targetUrl"},
-		{"dxCard", "item", "main", "targetUrl"},
-		{"dynamicOperation", "changeContent", "dxCard", "item", "main", "exContent", "button", "targetUrl"},
-	} {
-		if role := orderRoleFromURL(nestedString(c, path...)); role != "" {
-			return role
+	var role string
+	walkDecoded(c, func(value any) bool {
+		switch typed := value.(type) {
+		case string:
+			if candidate := orderRoleFromURL(html.UnescapeString(typed)); candidate != "" {
+				role = candidate
+				return true
+			}
 		}
-	}
-	return ""
+		return false
+	})
+	return role
 }
 
 func orderRoleFromURL(rawURL string) string {
@@ -362,18 +367,67 @@ func matchOrderID(s string) string {
 }
 
 func extractOrderIDFromContent(contentJSON string) string {
-	var c map[string]any
+	var c any
 	if json.Unmarshal([]byte(contentJSON), &c) != nil {
 		return ""
 	}
-	for _, path := range [][]string{
-		{"dxCard", "item", "main", "exContent", "button", "targetUrl"},
-		{"dxCard", "item", "main", "targetUrl"},
-		{"dynamicOperation", "changeContent", "dxCard", "item", "main", "exContent", "button", "targetUrl"},
-	} {
-		if id := matchOrderID(nestedString(c, path...)); id != "" {
-			return id
+	var orderID string
+	walkDecoded(c, func(value any) bool {
+		if s, ok := value.(string); ok {
+			if id := matchOrderID(html.UnescapeString(s)); id != "" {
+				orderID = id
+				return true
+			}
+		}
+		return false
+	})
+	return orderID
+}
+
+func walkDecoded(value any, visit func(any) bool) bool {
+	if visit(value) {
+		return true
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range typed {
+			if walkDecoded(child, visit) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if walkDecoded(child, visit) {
+				return true
+			}
+		}
+	case string:
+		var nested any
+		if json.Unmarshal([]byte(typed), &nested) == nil && walkDecoded(nested, visit) {
+			return true
+		}
+		if decoded, err := base64.StdEncoding.DecodeString(typed); err == nil {
+			if json.Unmarshal(decoded, &nested) == nil && walkDecoded(nested, visit) {
+				return true
+			}
 		}
 	}
-	return ""
+	return false
+}
+
+func cardJSONCandidates(raw map[string]any) []string {
+	var candidates []string
+	seen := make(map[string]bool)
+	walkDecoded(raw, func(value any) bool {
+		s, ok := value.(string)
+		if !ok || (!strings.Contains(s, "contentType") && !strings.Contains(s, "targetUrl") && !strings.Contains(s, "order_detail")) {
+			return false
+		}
+		if !seen[s] {
+			seen[s] = true
+			candidates = append(candidates, s)
+		}
+		return false
+	})
+	return candidates
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"xianyu-go/internal/db"
 )
@@ -69,13 +70,17 @@ func NewReplyService(cookieID string, store *db.Store, sender MessageSender,
 // Handle 收到一条聊天消息，按四级优先级回复。
 // 由 Account 在防抖后调用。返回是否产生了回复。
 func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
+	started := time.Now()
+	r.logger.Info("AI诊断：消息进入回复链", "chat_id", m.ChatID, "item_id", m.ItemID, "message_kind", classifyAIMessage(m), "text_len", len([]rune(m.Text)))
 	res := r.resolve(ctx, m)
 	if res == nil || res.Skip {
+		r.logger.Info("AI诊断：回复链无发送内容", "chat_id", m.ChatID, "item_id", m.ItemID, "has_result", res != nil, "skip", res != nil && res.Skip, "duration", time.Since(started).Round(time.Millisecond))
 		return nil
 	}
 	// 发送：图片优先，文本随后。reply_once 使用持久化分段状态，失败时只重试
 	// 尚未成功的部分。
 	if r.sender == nil {
+		r.logger.Warn("AI诊断：回复链得到内容但发送器未注入", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source)
 		return nil
 	}
 	record := db.DefaultReplyRecord{}
@@ -122,6 +127,7 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 			return err
 		}
 	}
+	r.logger.Info("AI诊断：回复链发送完成", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source, "text_len", len([]rune(res.Text)), "duration", time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
@@ -151,7 +157,7 @@ func (r *ReplyService) resolve(ctx context.Context, m ChatMessage) *ReplyResult 
 	// 优先级3：AI 回复。
 	if r.ai != nil {
 		if res, err := r.ai.Reply(ctx, m); err != nil {
-			r.logger.Error("AI 回复失败", "err", err)
+			r.logger.Error("AI 回复失败", "error_type", fmt.Sprintf("%T", err), "error_summary", safeAIErrorSummary(err))
 		} else if res != nil {
 			res.Source = "AI"
 			return res

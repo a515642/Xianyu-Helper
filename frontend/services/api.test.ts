@@ -7,6 +7,7 @@ import {
   completeQRVerification,
   createNotificationChannel,
   getAccountDetails,
+  getAIProfiles,
 	getCards,
 	getAutomationIssues,
   getItems,
@@ -105,6 +106,18 @@ test('getItemPublishBatches unwraps persisted batch list', async () => {
 test('getCards treats an empty backend response as an empty list', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(null)));
 	await expect(getCards()).resolves.toEqual([]);
+});
+
+test('getAIProfiles normalizes legacy null item bindings', async () => {
+	const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
+		{ id: 1, name: '旧配置', item_ids: null },
+		{ id: 2, name: '新配置', item_ids: ['item-2'] },
+	]));
+	vi.stubGlobal('fetch', fetchMock);
+	await expect(getAIProfiles('acc-1')).resolves.toEqual([
+		{ id: 1, name: '旧配置', item_ids: [] },
+		{ id: 2, name: '新配置', item_ids: ['item-2'] },
+	]);
 });
 
 test('automation issue APIs expose and resolve quarantined work', async () => {

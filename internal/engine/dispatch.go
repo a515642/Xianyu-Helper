@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"xianyu-go/internal/automation"
+	"xianyu-go/internal/logsafe"
 	"xianyu-go/internal/xianyu/protocol"
 )
 
@@ -26,11 +27,16 @@ func (a *Account) dispatch(decrypted map[string]any) {
 
 	// 系统业务事件不能丢弃：并发满时让 WS 读取产生背压，等待处理槽位。
 	// 普通聊天仍采用非阻塞限流，避免聊天洪峰拖垮连接。
-	isSystemEvent := automation.ExtractTaskFromWS(a.CookieID, a.currentCookieStr(), decrypted) != nil
+	task := automation.ExtractTaskFromWS(a.CookieID, a.currentCookieStr(), decrypted)
+	a.logger.Debug("AI诊断：WS 结构摘要", wsDiagnosticAttrs(decrypted, "dispatch_probe")...)
+	isSystemEvent := task != nil
 	if isSystemEvent {
+		a.logger.Info("AI诊断：WS 识别为系统事件", "trigger", task.TriggerType, "order_id", task.OrderID, "chat_id", task.ChatID, "item_id", task.ItemID)
+
 		select {
 		case a.sem <- struct{}{}:
 		case <-ctx.Done():
+			a.logger.Warn("AI诊断：系统事件等待并发槽位时上下文结束", "trigger", task.TriggerType, "order_id", task.OrderID, "chat_id", task.ChatID, "item_id", task.ItemID)
 			a.taskWG.Done()
 			return
 		}
@@ -46,7 +52,7 @@ func (a *Account) dispatch(decrypted map[string]any) {
 	case a.sem <- struct{}{}:
 	default:
 		a.taskWG.Done()
-		a.logger.Warn("消息处理并发达上限，丢弃消息", "limit", MessageSemaphoreSize)
+		a.logger.Warn("AI诊断：普通消息因并发已满被丢弃", "limit", MessageSemaphoreSize)
 		return
 	}
 	go func() {
@@ -63,6 +69,7 @@ func (a *Account) handleMessage(decrypted map[string]any) {
 
 func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string]any) {
 	if receipt, ok := extractMessageReadEvent(decrypted); ok {
+		a.logger.Debug("AI诊断：WS 识别为聊天已读回执", "chat_id", receipt.ChatID, "message_id", truncID(receipt.MessageID))
 		receipt.AccountID = a.CookieID
 		if h, ok := a.handler.(MessageReadHandler); ok {
 			if err := h.HandleMessageRead(ctx, receipt); err != nil {
@@ -76,10 +83,13 @@ func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string
 	// 第一优先级：系统卡片和平台通知进入自动化中心。
 	// 这里不判断具体业务，只做“平台事件”事实解析；系统消息永远不进入 AI 回复范围。
 	if task := automation.ExtractTaskFromWS(a.CookieID, a.currentCookieStr(), decrypted); task != nil {
-		if a.handler != nil {
-			if err := a.handler.HandleSystemEvent(ctx, *task); err != nil {
-				a.logger.Error("处理系统自动化事件失败", "err", err, "trigger", task.TriggerType)
-			}
+		a.logger.Info("AI诊断：开始分发系统事件", "trigger", task.TriggerType, "order_id", task.OrderID, "chat_id", task.ChatID, "item_id", task.ItemID)
+		if a.handler == nil {
+			a.logger.Warn("AI诊断：系统事件未分发，Handler 未注入", "trigger", task.TriggerType, "order_id", task.OrderID)
+		} else if err := a.handler.HandleSystemEvent(ctx, *task); err != nil {
+			a.logger.Error("处理系统自动化事件失败", "err", err, "trigger", task.TriggerType)
+		} else {
+			a.logger.Info("AI诊断：系统事件分发完成", "trigger", task.TriggerType, "order_id", task.OrderID, "chat_id", task.ChatID)
 		}
 		return
 	}
@@ -90,6 +100,8 @@ func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string
 
 	chat := extractChatMessage(decrypted, a.CookieID, a.currentCookieStr())
 	if chat != nil && chat.Text != "" {
+		a.logger.Debug("AI诊断：收到买家消息", append(wsDiagnosticAttrs(decrypted, "buyer_message"), "chat_id", chat.ChatID, "item_id", chat.ItemID, "message_id", truncID(chat.MessageID), "text_len", len([]rune(chat.Text)), "text_fingerprint", logsafe.ID(chat.Text))...)
+		a.logger.Debug("AI诊断：WS 识别为买家聊天", append(wsDiagnosticAttrs(decrypted, "buyer_chat"), "chat_id", chat.ChatID, "item_id", chat.ItemID, "message_id", truncID(chat.MessageID), "text_len", len([]rune(chat.Text)))...)
 		// 去重。
 		if !a.markAndCheckDedup(decrypted, chat) {
 			return
@@ -98,6 +110,62 @@ func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string
 		a.scheduleDebouncedReply(*chat)
 		return
 	}
+	a.logger.Debug("AI诊断：WS 消息未识别为已读回执、系统事件或有效聊天消息", wsDiagnosticAttrs(decrypted, "unclassified")...)
+}
+
+func wsDiagnosticAttrs(raw map[string]any, classification string) []any {
+	attrs := []any{"classification", classification, "raw_top_level_key_count", len(raw)}
+	m1, _ := raw["1"].(map[string]any)
+	m10, _ := m1["10"].(map[string]any)
+	text := toString(m10["reminderContent"])
+	sessionType := toString(m10["sessionType"])
+	attrs = append(attrs,
+		"chat_id_present", strings.TrimSpace(toString(m1["2"])) != "",
+		"message_id_present", strings.TrimSpace(toString(m1["3"])) != "",
+		"text_len", len([]rune(text)),
+		"red_reminder_len", len([]rune(toString(m10["redReminder"]))),
+		"detail_notice_len", len([]rune(toString(m10["detailNotice"]))),
+		"title_len", len([]rune(toString(m10["reminderTitle"]))),
+		"sender_id_present", strings.TrimSpace(toString(m10["senderUserId"])) != "",
+		"sender_official_1400", strings.TrimSuffix(strings.TrimSpace(toString(m10["senderUserId"])), "@goofish") == "1400",
+		"sender_compact_present", func() bool { m11, _ := m1["1"].(map[string]any); return strings.TrimSpace(toString(m11["1"])) != "" }(),
+		"session_type", sessionType,
+		"content_type", messageContentType(m1, m10),
+		"has_ext_json", strings.TrimSpace(toString(m10["extJson"])) != "",
+		"ext_json_len", len(toString(m10["extJson"])),
+		"has_biz_tag", strings.TrimSpace(toString(m10["bizTag"])) != "",
+		"biz_tag_len", len(toString(m10["bizTag"])),
+		"has_reminder_url", strings.TrimSpace(toString(m10["reminderUrl"])) != "",
+		"reminder_url_len", len(toString(m10["reminderUrl"])),
+		"nested_card_candidate", strings.TrimSpace(toString(func() any { m6, _ := m1["6"].(map[string]any); m63, _ := m6["3"].(map[string]any); return m63["5"] }())) != "",
+		"nested_card_len", len(toString(func() any { m6, _ := m1["6"].(map[string]any); m63, _ := m6["3"].(map[string]any); return m63["5"] }())),
+		"has_dx_card_marker", rawContainsKey(raw, "dxCard"),
+		"has_target_url_marker", rawContainsKey(raw, "targetUrl"),
+	)
+	return attrs
+}
+
+func rawContainsKey(value any, wanted string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if strings.EqualFold(key, wanted) || rawContainsKey(child, wanted) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if rawContainsKey(child, wanted) {
+				return true
+			}
+		}
+	case string:
+		var decoded any
+		if json.Unmarshal([]byte(typed), &decoded) == nil {
+			return rawContainsKey(decoded, wanted)
+		}
+	}
+	return false
 }
 
 func extractMessageReadEvent(v map[string]any) (MessageReadEvent, bool) {
@@ -203,7 +271,7 @@ func (a *Account) markAndCheckDedup(decrypted map[string]any, chat *ChatMessage)
 	now := time.Now()
 	if last, ok := a.processed[msgID]; ok {
 		if now.Sub(last) < MessageExpireTime {
-			a.logger.Info("消息已处理过，跳过", "msg_id", truncID(msgID))
+			a.logger.Info("AI诊断：聊天消息因去重被跳过", "msg_id", truncID(msgID), "chat_id", chat.ChatID, "item_id", chat.ItemID)
 			return false
 		}
 	}
@@ -253,6 +321,7 @@ func (a *Account) scheduleDebouncedReply(chat ChatMessage) {
 	}
 	entry := &debounceEntry{lastMsg: chat, deadline: deadline}
 	a.debounceTimers[chat.ChatID] = entry
+	a.logger.Debug("AI诊断：聊天消息已进入防抖队列", "chat_id", chat.ChatID, "item_id", chat.ItemID, "text_len", len([]rune(chat.Text)))
 
 	entry.timer = time.AfterFunc(MessageDebounceDelay, func() {
 		a.debounceMu.Lock()

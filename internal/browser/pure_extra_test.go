@@ -2,6 +2,8 @@ package browser
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,6 +100,29 @@ func TestChromiumExecutablePathFromEnv(t *testing.T) {
 	got := chromiumExecutablePath()
 	if got == nil || *got != "/usr/bin/chromium" {
 		t.Fatalf("chromiumExecutablePath=%v", got)
+	}
+}
+
+func TestResolvedChromiumExecutablePathUsesExplicitOverride(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "chromium")
+	if err := os.WriteFile(executable, []byte("browser"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", executable)
+	m := &Manager{}
+	got, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != executable {
+		t.Fatalf("resolved path=%v, want %q", got, executable)
+	}
+}
+
+func TestResolvedChromiumExecutablePathRequiresPlaywright(t *testing.T) {
+	t.Setenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "")
+	if _, err := (&Manager{}).resolvedChromiumExecutablePath(); err == nil {
+		t.Fatal("未启动 Playwright 时应返回错误")
 	}
 }
 

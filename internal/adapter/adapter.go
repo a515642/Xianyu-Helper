@@ -57,6 +57,11 @@ type orderDetailClient interface {
 //
 // 自动发货只走 automation.Center；用户聊天消息由 Account 内部 ReplyService 处理，
 // 故 HandleChatMessage 为空实现。
+const (
+	orderCreatedResolveTimeout = 4 * time.Second
+	orderCreatedResolvePoll    = 100 * time.Millisecond
+)
+
 type Adapter struct {
 	store      *db.Store
 	browser    browserManager
@@ -402,41 +407,167 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 
 // HandleSystemEvent 把系统卡片事件转发到自动化中心，由自动化规则决定是否执行。
 func (a *Adapter) HandleSystemEvent(ctx context.Context, task automation.Task) error {
+	a.logger.Info("AI诊断：系统事件进入 Adapter", "trigger", task.TriggerType, "order_id", task.OrderID, "chat_id", task.ChatID, "item_id", task.ItemID)
 	if task.TriggerType == automation.TriggerOrderCreated {
 		return a.handleOrderCreatedForAI(ctx, task)
 	}
 	if a.automation == nil {
+		a.logger.Debug("AI诊断：非订单创建系统事件未处理，自动化中心未注入", "trigger", task.TriggerType)
 		return nil
 	}
 	a.logger.Info("系统自动化事件", "account", task.AccountID, "trigger", task.TriggerType, "order_id", task.OrderID)
 	return a.automation.HandleTask(ctx, task)
 }
 
+func (a *Adapter) resolveOrderCreated(ctx context.Context, task automation.Task, logAttrs []interface{}) (*db.Order, error) {
+	if strings.TrimSpace(task.AccountID) == "" {
+		return nil, errors.New("订单创建事件缺少账号 ID")
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, orderCreatedResolveTimeout)
+	defer cancel()
+	var lastErr error
+	for {
+		order, err := a.store.Orders.Get(deadlineCtx, task.OrderID)
+		if err == nil && order != nil {
+			if err := validateOrderCreatedScope(order, task); err != nil {
+				a.logger.Warn("AI诊断：订单创建事件作用域校验失败", append(logAttrs, "reason", err.Error())...)
+				return nil, nil
+			}
+			a.logger.Info("AI诊断：订单创建事件已解析本地订单", append(logAttrs, "resolution", "local")...)
+			return order, nil
+		}
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return nil, fmt.Errorf("读取订单失败: %w", err)
+		}
+		lastErr = err
+		if task.ItemID != "" && task.BuyerID != "" {
+			if err := a.store.Orders.Upsert(deadlineCtx, task.OrderID, db.OrderUpsertOpts{CookieID: task.AccountID, ItemID: task.ItemID, BuyerID: task.BuyerID, ChatID: task.ChatID, OrderStatus: "processing"}); err != nil && !errors.Is(err, db.ErrOrderConflict) {
+				if errors.Is(err, db.ErrForbidden) {
+					return nil, nil
+				}
+				return nil, fmt.Errorf("保存订单创建事件事实失败: %w", err)
+			}
+			if order, err := a.store.Orders.Get(deadlineCtx, task.OrderID); err == nil {
+				if err := validateOrderCreatedScope(order, task); err != nil {
+					return nil, nil
+				}
+				a.logger.Info("AI诊断：订单创建事件已写入本地占位订单", append(logAttrs, "resolution", "event_facts")...)
+				return order, nil
+			}
+		}
+		timer := time.NewTimer(orderCreatedResolvePoll)
+		select {
+		case <-deadlineCtx.Done():
+			if lastErr != nil && !errors.Is(lastErr, db.ErrNotFound) {
+				return nil, lastErr
+			}
+			a.logger.Warn("AI诊断：订单创建事件解析超时", append(logAttrs, "reason", "order_not_found_timeout")...)
+			return nil, nil
+		case <-timer.C:
+		}
+	}
+}
+
+func validateOrderCreatedScope(order *db.Order, task automation.Task) error {
+	if order == nil || order.CookieID != task.AccountID {
+		return errors.New("account_mismatch")
+	}
+	if task.ChatID != "" && order.ChatID != "" && order.ChatID != task.ChatID {
+		return errors.New("chat_mismatch")
+	}
+	if task.ItemID != "" && order.ItemID != "" && order.ItemID != task.ItemID {
+		return errors.New("item_mismatch")
+	}
+	if task.BuyerID != "" && order.BuyerID != "" && order.BuyerID != task.BuyerID {
+		return errors.New("buyer_mismatch")
+	}
+	return nil
+}
+
 func (a *Adapter) handleOrderCreatedForAI(ctx context.Context, task automation.Task) error {
-	if a.store == nil || a.accounts == nil || task.OrderID == "" || task.ChatID == "" {
+	syntheticText := fmt.Sprintf("我已经拍下但暂未付款，订单号是 %s。如果我们协商达成了一致的价格，请帮我修改这个订单价格。如果没有达成一致，请忽略本消息。", task.OrderID)
+	logAttrs := []interface{}{"account", task.AccountID, "order_id", task.OrderID, "chat_id", task.ChatID, "item_id", task.ItemID}
+	a.logger.Info("AI诊断：订单创建事件开始检查 AI 改价注入", logAttrs...)
+	if a.store == nil {
+		a.logger.Warn("AI诊断：订单创建事件跳过，数据库未注入", logAttrs...)
 		return nil
 	}
-	order, err := a.store.Orders.Get(ctx, task.OrderID)
-	if err != nil || order == nil || order.CookieID != task.AccountID || order.ChatID != task.ChatID {
+	if a.accounts == nil {
+		a.logger.Warn("AI诊断：订单创建事件跳过，账号实例提供器未注入", logAttrs...)
+		return nil
+	}
+	if task.OrderID == "" || task.ChatID == "" {
+		a.logger.Warn("AI诊断：订单创建事件跳过，缺少订单或会话 ID", logAttrs...)
+		return nil
+	}
+	order, err := a.resolveOrderCreated(ctx, task, logAttrs)
+	if err != nil {
+		return err
+	}
+	if order == nil {
+		return nil
+	}
+	status := db.NormalizeOrderStatus(order.OrderStatus)
+	orderAttrs := append(logAttrs, "order_item_id", order.ItemID, "order_chat_id", order.ChatID, "order_status", status)
+	if order.CookieID != task.AccountID {
+		a.logger.Warn("AI诊断：订单创建事件跳过，订单不属于当前账号", append(orderAttrs, "reason", "account_mismatch")...)
+		return nil
+	}
+	if order.ChatID != task.ChatID {
+		a.logger.Warn("AI诊断：订单创建事件跳过，订单会话不匹配", append(orderAttrs, "reason", "chat_mismatch")...)
+		return nil
+	}
+	if status != "processing" {
+		a.logger.Info("AI诊断：订单创建事件跳过，订单不是待付款状态", append(orderAttrs, "reason", "not_pending_payment")...)
 		return nil
 	}
 	profile, err := a.store.AIProfiles.FindForItem(ctx, task.AccountID, order.ItemID)
-	if err != nil || profile == nil || !profile.BargainStrategyEnabled {
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			a.logger.Info("AI诊断：订单创建事件跳过，商品未绑定启用的 AI 助手", append(orderAttrs, "reason", "profile_not_found")...)
+		} else {
+			a.logger.Warn("AI诊断：读取商品 AI 助手失败", append(orderAttrs, "error_type", fmt.Sprintf("%T", err))...)
+		}
 		return nil
 	}
-	const syntheticText = "我已经拍下但暂未付款，如果我们协商达成了一致的价格，请帮我修改订单价格。如果没有达成一致，请忽略本消息。"
-	if seen, seenErr := a.store.AIReply.HasProfileConversationMessage(ctx, profile.ID, task.AccountID, task.ChatID, order.ItemID, "user", syntheticText); seenErr != nil || seen {
+	if profile == nil {
+		a.logger.Info("AI诊断：订单创建事件跳过，商品 AI 助手为空", append(orderAttrs, "reason", "profile_nil")...)
+		return nil
+	}
+	profileAttrs := append(orderAttrs, "profile_id", profile.ID, "bargain_enabled", profile.BargainStrategyEnabled)
+	if !profile.BargainStrategyEnabled {
+		a.logger.Info("AI诊断：订单创建事件跳过，商品 AI 助手未启用砍价策略", append(profileAttrs, "reason", "bargain_disabled")...)
+		return nil
+	}
+	seen, seenErr := a.store.AIReply.HasProfileConversationMessage(ctx, profile.ID, task.AccountID, task.ChatID, order.ItemID, "user", syntheticText)
+	if seenErr != nil {
+		a.logger.Warn("AI诊断：检查订单创建合成消息幂等性失败", append(profileAttrs, "error_type", fmt.Sprintf("%T", seenErr))...)
 		return seenErr
 	}
-	sender, ok := a.accounts.GetInstance(task.AccountID)
-	if !ok {
+	if seen {
+		a.logger.Info("AI诊断：订单创建合成消息已注入过，跳过重复注入", profileAttrs...)
 		return nil
 	}
-	if handler, ok := sender.(interface {
-		InjectAIMessage(context.Context, engine.ChatMessage) error
-	}); ok {
-		return handler.InjectAIMessage(ctx, engine.ChatMessage{AccountID: task.AccountID, CookieStr: task.CookieStr, ChatID: task.ChatID, SenderUserID: order.BuyerID, ItemID: order.ItemID, Text: syntheticText, MessageID: "order-created:" + task.OrderID})
+	sender, ok := a.accounts.GetInstance(task.AccountID)
+	if !ok || sender == nil {
+		a.logger.Warn("AI诊断：订单创建事件跳过，未找到账号实例", append(profileAttrs, "reason", "account_instance_not_found")...)
+		return nil
 	}
+	handler, ok := sender.(interface {
+		InjectAIMessage(context.Context, engine.ChatMessage) error
+	})
+	if !ok {
+		a.logger.Warn("AI诊断：订单创建事件跳过，账号实例不支持 AI 消息注入", append(profileAttrs, "reason", "inject_not_supported")...)
+		return nil
+	}
+	started := time.Now()
+	a.logger.Info("AI诊断：开始调用 InjectAIMessage", append(profileAttrs, "message_kind", "order_created", "text_len", len([]rune(syntheticText)))...)
+	err = handler.InjectAIMessage(ctx, engine.ChatMessage{AccountID: task.AccountID, CookieStr: task.CookieStr, ChatID: task.ChatID, SenderUserID: order.BuyerID, ItemID: order.ItemID, Text: syntheticText, MessageID: "order-created:" + task.OrderID})
+	if err != nil {
+		a.logger.Warn("AI诊断：InjectAIMessage 返回错误", append(profileAttrs, "duration", time.Since(started).Round(time.Millisecond), "error_type", fmt.Sprintf("%T", err))...)
+		return err
+	}
+	a.logger.Info("AI诊断：InjectAIMessage 完成", append(profileAttrs, "duration", time.Since(started).Round(time.Millisecond))...)
 	return nil
 }
 

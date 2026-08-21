@@ -377,10 +377,19 @@ func New(cfg Config) *Account {
 
 // InjectAIMessage submits an internally generated user-context message to the reply chain.
 func (a *Account) InjectAIMessage(ctx context.Context, m ChatMessage) error {
+	a.logger.Info("AI诊断：Account 收到内部 AI 消息", "chat_id", m.ChatID, "item_id", m.ItemID, "message_kind", classifyAIMessage(m), "text_len", len([]rune(m.Text)))
 	if a.reply == nil {
+		a.logger.Warn("AI诊断：内部 AI 消息跳过，回复服务未初始化", "chat_id", m.ChatID, "item_id", m.ItemID)
 		return nil
 	}
-	return a.reply.Handle(ctx, m)
+	started := time.Now()
+	err := a.reply.Handle(ctx, m)
+	if err != nil {
+		a.logger.Warn("AI诊断：内部 AI 消息回复链失败", "chat_id", m.ChatID, "item_id", m.ItemID, "duration", time.Since(started).Round(time.Millisecond), "error_type", fmt.Sprintf("%T", err))
+	} else {
+		a.logger.Info("AI诊断：内部 AI 消息回复链完成", "chat_id", m.ChatID, "item_id", m.ItemID, "duration", time.Since(started).Round(time.Millisecond))
+	}
+	return err
 }
 
 // Run 阻塞运行账号主循环，直到 ctx 取消或不可恢复错误。

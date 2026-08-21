@@ -47,7 +47,7 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
   const itemLabel = (id: string) => items.find(item => item.item_id === id)?.item_title || id;
   const assignedElsewhere = useMemo(() => {
     const map = new Map<string, string>();
-    profiles.forEach(profile => profile.item_ids.forEach(id => map.set(id, profile.name)));
+    profiles.forEach(profile => (profile.item_ids || []).forEach(id => map.set(id, profile.name)));
     return map;
   }, [profiles]);
   const visibleItems = useMemo(() => {
@@ -58,7 +58,7 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
 
   const openCreate = () => { setEditing(blankProfile(accountID)); setEditingID(null); setApiKey(''); setClearKey(false); setModels([]); setModelError(''); setItemSearch(''); };
   const openEdit = (profile: AIProfile) => {
-    setEditing({ cookie_id: profile.cookie_id, name: profile.name, enabled: profile.enabled, use_system_api: profile.use_system_api, base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts, thinking_mode: profile.thinking_mode || 'disabled', bargain_strategy_enabled: profile.bargain_strategy_enabled === true, max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds, item_ids: [...profile.item_ids] });
+    setEditing({ cookie_id: profile.cookie_id, name: profile.name, enabled: profile.enabled, use_system_api: profile.use_system_api, base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts, thinking_mode: profile.thinking_mode || 'disabled', bargain_strategy_enabled: profile.bargain_strategy_enabled === true, max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds, item_ids: [...(profile.item_ids || [])] });
     setEditingID(profile.id); setApiKey(''); setClearKey(false); setModels([]); setModelError(''); setItemSearch('');
   };
   const loadModels = async () => {
@@ -107,7 +107,7 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
     {error && <div className="rounded-2xl bg-red-50 px-5 py-4 font-bold text-red-700">{error}</div>}
     {loading ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-sky-500" /></div> : profiles.length === 0 ? <div className="ios-card rounded-2xl p-10 text-center text-gray-500">当前账号还没有 AI 助手，请先创建。</div> : <div className="grid gap-5 lg:grid-cols-2">{profiles.map(profile => <div key={profile.id} className="ios-card rounded-2xl p-6">
       <div className="flex items-start justify-between gap-4"><div><h3 className="flex items-center gap-2 text-xl font-extrabold text-gray-900"><Bot className="h-5 w-5 text-purple-500" />{profile.name}</h3><p className="mt-2 text-sm text-gray-500">{profile.use_system_api ? '继承系统 API 配置' : '使用自定义 API 配置'} · {profile.model_name || '系统默认模型'}</p></div><span className={`rounded-lg px-2.5 py-1 text-xs font-bold ${profile.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{profile.enabled ? '已启用' : '已停用'}</span></div>
-      <div className="mt-5 flex flex-wrap gap-2">{profile.item_ids.map(id => <span key={id} className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700">{itemLabel(id)}</span>)}{profile.item_ids.length === 0 && <span className="text-sm text-gray-400">未绑定商品</span>}</div>
+      <div className="mt-5 flex flex-wrap gap-2">{(profile.item_ids || []).map(id => <span key={id} className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700">{itemLabel(id)}</span>)}{(profile.item_ids || []).length === 0 && <span className="text-sm text-gray-400">未绑定商品</span>}</div>
       <div className="mt-5 flex items-center justify-end gap-3"><button type="button" role="switch" aria-checked={profile.enabled} aria-label={`${profile.name}启用状态`} onClick={async () => { try { await updateAIProfile(profile.id, { cookie_id: profile.cookie_id, name: profile.name, enabled: !profile.enabled, use_system_api: profile.use_system_api, base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts, thinking_mode: profile.thinking_mode, bargain_strategy_enabled: profile.bargain_strategy_enabled === true, max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds, item_ids: profile.item_ids }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '更新 AI 开关失败'); } }} className={`relative h-7 w-12 rounded-full transition-colors ${profile.enabled ? 'bg-brand' : 'bg-gray-300'}`}><span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${profile.enabled ? 'translate-x-5' : 'translate-x-0'}`} /></button><button type="button" onClick={() => openEdit(profile)} className="rounded-xl bg-gray-100 px-4 py-2 font-bold text-gray-700 hover:bg-gray-200">编辑</button><button type="button" onClick={() => void removeProfile(profile.id)} className="rounded-xl bg-red-50 px-4 py-2 font-bold text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /></button></div>
     </div>)}</div>}
 

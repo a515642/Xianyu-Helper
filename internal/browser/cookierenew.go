@@ -66,7 +66,15 @@ func (m *Manager) newPersistentPasswordContext(ctx context.Context, cookieID, us
 	var bctx playwright.BrowserContext
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
-		bctx, err = m.pw.Chromium.LaunchPersistentContext(userDataDir, passwordPersistentContextOptions(headless, m.headlessUserAgent()))
+		executablePath, pathErr := m.resolvedChromiumExecutablePath()
+		if pathErr != nil {
+			releaseSlot()
+			unlock()
+			return nil, nil, pathErr
+		}
+		options := passwordPersistentContextOptions(headless, m.headlessUserAgent())
+		options.ExecutablePath = executablePath
+		bctx, err = m.pw.Chromium.LaunchPersistentContext(userDataDir, options)
 		if err == nil {
 			break
 		}
@@ -481,13 +489,19 @@ func (m *Manager) newPersistentRenewContext(ctx context.Context, cookieID, cooki
 	if len(captchaProfile) > 0 && captchaProfile[0] {
 		viewport = &playwright.Size{Width: 1980, Height: 1024}
 	}
+	executablePath, err := m.resolvedChromiumExecutablePath()
+	if err != nil {
+		releaseSlot()
+		unlock()
+		return nil, nil, err
+	}
 	var bctx playwright.BrowserContext
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
 		options := playwright.BrowserTypeLaunchPersistentContextOptions{
 			Headless:       playwright.Bool(headless),
 			Args:           chromiumLaunchArgs(),
-			ExecutablePath: chromiumExecutablePath(),
+			ExecutablePath: executablePath,
 			Viewport:       viewport,
 			Locale:         playwright.String(defaultLang),
 			TimezoneId:     playwright.String(defaultTZ),

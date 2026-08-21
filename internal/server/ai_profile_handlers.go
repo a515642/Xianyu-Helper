@@ -67,6 +67,11 @@ func (s *Server) listAIProfiles(w http.ResponseWriter, r *http.Request) {
 	if profiles == nil {
 		profiles = []db.AIProfile{}
 	}
+	for i := range profiles {
+		if profiles[i].ItemIDs == nil {
+			profiles[i].ItemIDs = []string{}
+		}
+	}
 	writeJSON(w, http.StatusOK, profiles)
 }
 

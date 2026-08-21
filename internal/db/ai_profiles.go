@@ -201,7 +201,7 @@ func (a *AIProfiles) itemIDs(ctx context.Context, profileID int64) ([]string, er
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	out := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

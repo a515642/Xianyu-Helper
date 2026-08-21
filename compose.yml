@@ -35,7 +35,8 @@ services:
 
   app:
     image: ${XIANYU_IMAGE:-ghcr.io/a515642/xianyu-helper:latest}
-    pull_policy: always
+    # 本地开发/自建镜像优先使用本地标签；需要更新远程镜像时显式执行 `docker compose pull app`。
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       postgres:
