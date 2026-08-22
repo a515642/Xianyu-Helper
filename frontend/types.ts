@@ -99,7 +99,6 @@ export interface AIProfileInput {
   enabled: boolean;
   use_system_api: boolean;
   api_key?: string;
-  clear_api_key?: boolean;
   base_url: string;
   model_name: string;
   custom_prompts: string;
