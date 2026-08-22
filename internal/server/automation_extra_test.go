@@ -201,9 +201,10 @@ func TestAutomationRuleRejectsAPICard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, _ = store.DB.ExecContext(context.Background(), `INSERT INTO item_info (cookie_id,item_id,item_title) VALUES ('acc1','it-auto','商品')`)
 	h := srv.Router()
 	cookie := loginHelper(t, h)
-	body := `{"cookie_id":"acc1","trigger_type":"order_paid","actions":[{"action_type":"send_card","card_id":` + itoa(cardID) + `}]}`
+	body := `{"cookie_id":"acc1","item_id":"it-auto","trigger_type":"order_paid","actions":[{"action_type":"send_card","card_id":` + itoa(cardID) + `}]}`
 	req := httptest.NewRequest(http.MethodPost, "/automation-rules", strings.NewReader(body))
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
@@ -214,6 +215,23 @@ func TestAutomationRuleRejectsAPICard(t *testing.T) {
 }
 
 // TestAutomationRuleSendCardMissingCardID send_card 缺 card_id 400。
+func TestAutomationRuleRejectsAccountScopeForProductTriggers(t *testing.T) {
+	srv, _, cleanup := newTestServer(t)
+	defer cleanup()
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+	for _, trigger := range []string{automation.TriggerOrderPaid, automation.TriggerBuyerReviewed} {
+		body := `{"cookie_id":"acc1","trigger_type":"` + trigger + `","actions":[{"action_type":"send_text","message_template":"x"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/automation-rules", strings.NewReader(body))
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "必须选择具体商品") {
+			t.Fatalf("trigger=%s status=%d body=%s", trigger, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestAutomationRuleSendCardMissingCardID(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)
 	defer cleanup()

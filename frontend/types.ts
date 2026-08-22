@@ -240,7 +240,30 @@ export interface Item {
 }
 
 export type AutomationTriggerType = 'order_paid' | 'buyer_reviewed' | 'review_missing_timeout';
-export type AutomationActionType = 'confirm_shipment' | 'send_card' | 'send_text';
+export type AutomationActionType = 'confirm_shipment' | 'send_card' | 'send_template' | 'send_text';
+
+export interface DeliveryTemplateMessage {
+  id?: number;
+  sort_order?: number;
+  content: string;
+}
+
+export interface DeliveryTemplate {
+  id: number;
+  name: string;
+  enabled: boolean;
+  messages: DeliveryTemplateMessage[];
+  keys: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface DeliveryTemplateBinding {
+  key: string;
+  card_id: number;
+  card_name?: string;
+  delivery_count: number;
+}
 
 // Rules
 export interface ShippingRule {
@@ -271,12 +294,18 @@ export interface AutomationAction {
   config_json?: string;
   enabled: boolean;
   sort_order?: number;
+  delivery_template_id?: number;
+  delivery_template_name?: string;
+  template_bindings?: DeliveryTemplateBinding[];
 }
 
 export interface ShippingVariant {
   id?: string;
   spec_name: string;
   spec_value: string;
+  delivery_mode?: 'card' | 'template';
+  delivery_template_id?: number;
+  template_bindings?: DeliveryTemplateBinding[];
   card_id: number;
   card_name?: string;
   card_type?: Card['type'];

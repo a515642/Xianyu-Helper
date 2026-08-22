@@ -510,6 +510,33 @@ test('getShippingRules exposes buyer reviewed gift rules as automation rules', a
   });
 });
 
+test('getShippingRules preserves template delivery actions and opaque bindings', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([{
+    id: 21, cookie_id: 'cookie-1', item_id: 'item-1', trigger_type: 'order_paid', enabled: true,
+    actions: [{ action_type: 'send_template', delivery_template_id: 3, delivery_template_name: '组合模板', card_id: 0,
+      template_bindings: [{ variable_key: 'a', card_id: 8, card_name: '数据组', delivery_count: 2 }],
+      config_json: '{"spec_name":"套餐","spec_value":"标准"}', enabled: true, sort_order: 1 }],
+  }])))
+  const rules = await getShippingRules();
+  expect(rules[0].variants).toHaveLength(1);
+  expect(rules[0].variants[0]).toMatchObject({ delivery_mode: 'template', delivery_template_id: 3, spec_name: '套餐', spec_value: '标准' });
+  expect(rules[0].variants[0].template_bindings).toEqual([{ key: 'a', card_id: 8, card_name: '数据组', delivery_count: 2 }]);
+});
+
+test('updateShippingRule posts template bindings and keeps confirm last', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true, id: 22 }));
+  vi.stubGlobal('fetch', fetchMock);
+  await updateShippingRule({ cookie_id: 'cookie-1', item_id: 'item-1', trigger_type: 'order_paid', enabled: true, variants: [
+    { spec_name: '套餐', spec_value: '标准', delivery_mode: 'template', delivery_template_id: 3, template_bindings: [{ key: 'a', card_id: 8, delivery_count: 2 }], card_id: 0, delivery_count: 1, enabled: true },
+    { spec_name: '套餐', spec_value: '备用', delivery_mode: 'card', card_id: 9, delivery_count: 1, enabled: true },
+  ] });
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(body.actions[0]).toMatchObject({ action_type: 'send_template', card_id: 0, delivery_template_id: 3, template_bindings: [{ key: 'a', card_id: 8, delivery_count: 2 }] });
+  expect(body.actions[1]).toMatchObject({ action_type: 'send_card', card_id: 9 });
+  expect(body.actions.at(-1)).toMatchObject({ action_type: 'confirm_shipment' });
+  expect(JSON.parse(body.actions[0].config_json)).toEqual({ spec_name: '套餐', spec_value: '标准', delay_override: false });
+});
+
 test('getReplyRules labels keyword matching according to engine contains behavior', async () => {
   const fetchMock = vi.fn().mockResolvedValue(jsonResponse([{
     id: 42,
@@ -739,6 +766,15 @@ test('updateShippingRule preserves text actions while editing card variants', as
     'confirm_shipment',
   ]);
   expect(body.actions[1].message_template).toBe('发货提示');
+});
+
+test('updateShippingRule posts buyer reviewed template without confirmation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true, id: 23 }));
+  vi.stubGlobal('fetch', fetchMock);
+  await updateShippingRule({ cookie_id: 'cookie-1', item_id: 'item-1', trigger_type: 'buyer_reviewed', enabled: true, variants: [{ delivery_mode: 'template', delivery_template_id: 4, template_bindings: [{ key: 'gift', card_id: 8, delivery_count: 1 }], card_id: 0, delivery_count: 1, spec_name: '', spec_value: '', enabled: true }] });
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(body.actions).toEqual([expect.objectContaining({ action_type: 'send_template', delivery_template_id: 4, template_bindings: [expect.objectContaining({ key: 'gift', card_id: 8, delivery_count: 1 })] })]);
+  expect(body.actions.some((action: { action_type: string }) => action.action_type === 'confirm_shipment')).toBe(false);
 });
 
 test('updateShippingRule posts review request text action without card requirement', async () => {

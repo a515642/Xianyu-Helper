@@ -69,21 +69,16 @@ type publishBatchParsedRow struct {
 }
 
 type publishAutomationConfig struct {
-	PaidDelivery  publishCardAutomation   `json:"paid_delivery"`
-	ReviewGift    publishCardAutomation   `json:"review_gift"`
+	SchemaVersion int                     `json:"schema_version"`
+	PaidDelivery  publishRuleReference    `json:"paid_delivery"`
+	ReviewGift    publishRuleReference    `json:"review_gift"`
 	ReviewRequest publishReviewRequestCfg `json:"review_request"`
 }
 
-type publishCardAutomation struct {
-	Enabled    bool                `json:"enabled"`
-	Actions    []publishCardAction `json:"actions"`
-	ParseError string              `json:"-"`
-}
-
-type publishCardAction struct {
-	CardID        int64 `json:"card_id"`
-	DeliveryCount int   `json:"delivery_count"`
-	DelaySeconds  int   `json:"delay_seconds"`
+type publishRuleReference struct {
+	RuleID             int64              `json:"rule_id"`
+	SourceRuleSnapshot *db.AutomationRule `json:"source_rule_snapshot,omitempty"`
+	ParseError         string             `json:"-"`
 }
 
 type publishReviewRequestCfg struct {
@@ -1080,50 +1075,31 @@ func firstError(err, fallback error) error {
 	return fallback
 }
 
+func (s *Server) clonePublishAutomationRule(ctx context.Context, userID int64, cookieID, itemID, name string, source db.AutomationRule) error {
+	if source.ItemID == "" || source.CookieID != cookieID || itemID == "" {
+		return errors.New("自动化规则来源或目标商品无效")
+	}
+	input := db.AutomationRuleInput{UserID: userID, CookieID: cookieID, ItemID: itemID, Name: name, TriggerType: source.TriggerType, Enabled: source.Enabled, Priority: source.Priority, ConfigJSON: source.ConfigJSON}
+	for _, action := range source.Actions {
+		bindings := append([]db.DeliveryTemplateBinding(nil), action.TemplateBindings...)
+		input.Actions = append(input.Actions, db.AutomationActionInput{ActionType: action.ActionType, CardID: action.CardID, DeliveryCount: action.DeliveryCount, MessageTemplate: action.MessageTemplate, DelaySeconds: action.DelaySeconds, ConfigJSON: action.ConfigJSON, Enabled: action.Enabled, SortOrder: action.SortOrder, DeliveryTemplateID: action.DeliveryTemplateID, TemplateBindings: bindings})
+	}
+	return s.ensurePublishAutomationRule(ctx, input)
+}
+
 func (s *Server) createPublishAutomationRules(ctx context.Context, userID int64, row db.ItemPublishBatchRow, res *mtop.PublishItemResult) error {
 	var cfg publishAutomationConfig
 	if err := json.Unmarshal([]byte(row.AutomationJSON), &cfg); err != nil {
 		return err
 	}
 	title := firstNonEmpty(res.Title, row.Title)
-	if cfg.PaidDelivery.Enabled {
-		actions := make([]db.AutomationActionInput, 0, len(cfg.PaidDelivery.Actions)+1)
-		for index, action := range cfg.PaidDelivery.Actions {
-			actionConfig, _ := json.Marshal(map[string]any{"delay_override": true})
-			actions = append(actions, db.AutomationActionInput{
-				ActionType: automation.ActionSendCard, CardID: action.CardID,
-				DeliveryCount: action.DeliveryCount, DelaySeconds: action.DelaySeconds,
-				ConfigJSON: string(actionConfig), Enabled: true, SortOrder: index + 1,
-			})
-		}
-		actions = append(actions, db.AutomationActionInput{
-			ActionType: automation.ActionConfirmShipment, Enabled: true, SortOrder: len(actions) + 1,
-		})
-		if err := s.ensurePublishAutomationRule(ctx, db.AutomationRuleInput{
-			UserID: userID, CookieID: row.CookieID, ItemID: res.ItemID,
-			Name: "付款后自动发货 - " + title, TriggerType: automation.TriggerOrderPaid,
-			Enabled: true, Priority: 100, ConfigJSON: "{}",
-			Actions: actions,
-		}); err != nil {
+	if cfg.PaidDelivery.RuleID > 0 && cfg.PaidDelivery.SourceRuleSnapshot != nil {
+		if err := s.clonePublishAutomationRule(ctx, userID, row.CookieID, res.ItemID, "付款后自动发货 - "+title, *cfg.PaidDelivery.SourceRuleSnapshot); err != nil {
 			return err
 		}
 	}
-	if cfg.ReviewGift.Enabled {
-		actions := make([]db.AutomationActionInput, 0, len(cfg.ReviewGift.Actions))
-		for index, action := range cfg.ReviewGift.Actions {
-			actionConfig, _ := json.Marshal(map[string]any{"delay_override": true})
-			actions = append(actions, db.AutomationActionInput{
-				ActionType: automation.ActionSendCard, CardID: action.CardID,
-				DeliveryCount: action.DeliveryCount, DelaySeconds: action.DelaySeconds,
-				ConfigJSON: string(actionConfig), Enabled: true, SortOrder: index + 1,
-			})
-		}
-		if err := s.ensurePublishAutomationRule(ctx, db.AutomationRuleInput{
-			UserID: userID, CookieID: row.CookieID, ItemID: res.ItemID,
-			Name: "评价后发送赠品 - " + title, TriggerType: automation.TriggerBuyerReviewed,
-			Enabled: true, Priority: 100, ConfigJSON: "{}",
-			Actions: actions,
-		}); err != nil {
+	if cfg.ReviewGift.RuleID > 0 && cfg.ReviewGift.SourceRuleSnapshot != nil {
+		if err := s.clonePublishAutomationRule(ctx, userID, row.CookieID, res.ItemID, "评价后发送赠品 - "+title, *cfg.ReviewGift.SourceRuleSnapshot); err != nil {
 			return err
 		}
 	}
@@ -1245,26 +1221,28 @@ func (s *Server) parsePublishRows(ctx context.Context, userID int64, defaultCook
 				row.Errors = append(row.Errors, err.Error())
 			}
 		}
-		row.Errors = append(row.Errors, s.validatePublishAutomation(ctx, userID, row.Automation)...)
+		row.Errors = append(row.Errors, s.validatePublishAutomation(ctx, userID, row.CookieID, &row.Automation)...)
 		out = append(out, row)
 	}
 	return out
 }
 
+func parsePublishRuleReference(raw string) publishRuleReference {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return publishRuleReference{}
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return publishRuleReference{ParseError: "规则 ID 必须是正整数"}
+	}
+	return publishRuleReference{RuleID: id}
+}
+
 func parsePublishAutomation(m map[string]any) publishAutomationConfig {
-	cfg := publishAutomationConfig{}
-	paidActions, paidParseErr := parsePublishCardActions(firstImportString(m, "paid_delivery_contents", "付款发货内容"))
-	cfg.PaidDelivery = publishCardAutomation{
-		Enabled:    parseLooseBool(firstImportString(m, "paid_delivery_enabled", "付款发货启用")),
-		Actions:    paidActions,
-		ParseError: paidParseErr,
-	}
-	reviewGiftActions, reviewGiftParseErr := parsePublishCardActions(firstImportString(m, "review_gift_contents", "评价赠品内容"))
-	cfg.ReviewGift = publishCardAutomation{
-		Enabled:    parseLooseBool(firstImportString(m, "review_gift_enabled", "评价赠品启用")),
-		Actions:    reviewGiftActions,
-		ParseError: reviewGiftParseErr,
-	}
+	cfg := publishAutomationConfig{SchemaVersion: 2}
+	cfg.PaidDelivery = parsePublishRuleReference(firstImportString(m, "paid_delivery_rule_id", "付款发货规则ID", "付款后自动发货规则ID"))
+	cfg.ReviewGift = parsePublishRuleReference(firstImportString(m, "review_gift_rule_id", "评价赠品规则ID", "评价后发送赠品规则ID"))
 	cfg.ReviewRequest = publishReviewRequestCfg{
 		Enabled:           parseLooseBool(firstImportString(m, "review_request_enabled", "求评价启用")),
 		AfterShippedHours: atoiPublishDefault(firstImportString(m, "review_request_after_hours", "求评价等待小时"), 72),
@@ -1275,72 +1253,57 @@ func parsePublishAutomation(m map[string]any) publishAutomationConfig {
 	return cfg
 }
 
-// parsePublishCardActions 解析“卡密组ID:每件份数:延迟秒”，多条内容用分号或换行分隔。
-func parsePublishCardActions(raw string) ([]publishCardAction, string) {
-	entries := strings.FieldsFunc(strings.TrimSpace(raw), func(r rune) bool {
-		return r == ';' || r == '；' || r == '\n' || r == '\r'
-	})
-	if len(entries) == 0 {
-		return nil, ""
-	}
-	actions := make([]publishCardAction, 0, len(entries))
-	for index, entry := range entries {
-		parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(entry), "：", ":"), ":")
-		if len(parts) < 1 || len(parts) > 3 || strings.TrimSpace(parts[0]) == "" {
-			return nil, fmt.Sprintf("第%d项格式错误，应为 卡密组ID:每件份数:延迟秒", index+1)
-		}
-		cardID, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-		if err != nil || cardID <= 0 {
-			return nil, fmt.Sprintf("第%d项卡密组ID无效", index+1)
-		}
-		count := 1
-		if len(parts) >= 2 && strings.TrimSpace(parts[1]) != "" {
-			count, err = strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil || count <= 0 {
-				return nil, fmt.Sprintf("第%d项每件份数必须大于0", index+1)
-			}
-		}
-		delay := 0
-		if len(parts) == 3 && strings.TrimSpace(parts[2]) != "" {
-			delay, err = strconv.Atoi(strings.TrimSpace(parts[2]))
-			if err != nil || delay < 0 {
-				return nil, fmt.Sprintf("第%d项延迟秒不能小于0", index+1)
-			}
-		}
-		actions = append(actions, publishCardAction{CardID: cardID, DeliveryCount: count, DelaySeconds: delay})
-	}
-	return actions, ""
-}
-
-func (s *Server) validatePublishAutomation(ctx context.Context, userID int64, cfg publishAutomationConfig) []string {
+func (s *Server) validatePublishAutomation(ctx context.Context, userID int64, cookieID string, cfg *publishAutomationConfig) []string {
 	var errs []string
-	validateCards := func(config publishCardAutomation, label string) {
-		if !config.Enabled {
+	validateRule := func(ref *publishRuleReference, trigger, label string) {
+		if ref.RuleID == 0 && ref.ParseError == "" {
 			return
 		}
-		if config.ParseError != "" {
-			errs = append(errs, label+config.ParseError)
+		if ref.ParseError != "" {
+			errs = append(errs, label+ref.ParseError)
 			return
 		}
-		if len(config.Actions) == 0 {
-			errs = append(errs, label+"需要至少配置一条发货内容")
+		rules, err := s.Store.Automation.ListForUser(ctx, userID)
+		if err != nil {
+			errs = append(errs, label+"规则查询失败")
 			return
 		}
-		for index, action := range config.Actions {
-			prefix := fmt.Sprintf("%s第%d项", label, index+1)
-			if !s.cardOwnedByUser(ctx, userID, action.CardID) {
-				errs = append(errs, prefix+"卡密组不存在或不属于当前用户")
-			}
-			if action.DeliveryCount <= 0 {
-				errs = append(errs, prefix+"每件份数必须大于0")
-			}
-			if action.DelaySeconds < 0 || action.DelaySeconds > 3600 {
-				errs = append(errs, prefix+"延迟秒必须在 0 到 3600 之间")
+		var matched *db.AutomationRule
+		for index := range rules {
+			rule := &rules[index]
+			if rule.ID == ref.RuleID {
+				matched = rule
+				break
 			}
 		}
+		if matched == nil {
+			errs = append(errs, fmt.Sprintf("%s规则 %d 不存在或无权限", label, ref.RuleID))
+			return
+		}
+		if matched.CookieID != cookieID {
+			errs = append(errs, label+"规则不属于当前行账号")
+			return
+		}
+		if matched.TriggerType != trigger {
+			errs = append(errs, label+"规则触发类型不匹配")
+			return
+		}
+		if matched.ItemID == "" {
+			errs = append(errs, label+"规则必须绑定具体商品")
+			return
+		}
+		if matched.ItemTitle == "" {
+			matched.ItemTitle = matched.ItemID
+		}
+		if !matched.Enabled {
+			errs = append(errs, label+"规则已停用")
+			return
+		}
+		snapshot := *matched
+		ref.SourceRuleSnapshot = &snapshot
 	}
-	validateCards(cfg.PaidDelivery, "付款发货")
-	validateCards(cfg.ReviewGift, "评价赠品")
+	validateRule(&cfg.PaidDelivery, automation.TriggerOrderPaid, "付款发货")
+	validateRule(&cfg.ReviewGift, automation.TriggerBuyerReviewed, "评价赠品")
 	if cfg.ReviewRequest.Enabled {
 		if cfg.ReviewRequest.AfterShippedHours <= 0 {
 			errs = append(errs, "求评价等待小时必须大于 0")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/deliverytemplate"
 	"xianyu-go/internal/xianyu/cookierefresh"
 	"xianyu-go/internal/xianyu/mtop"
 )
@@ -531,7 +532,7 @@ func runnableActions(task Task, actions []db.AutomationAction) []db.AutomationAc
 	out := make([]db.AutomationAction, 0, len(actions))
 	if task.TriggerType == TriggerOrderPaid {
 		for _, action := range actions {
-			if action.Enabled && action.ActionType == ActionSendCard && actionMatchesOrderSpec(task, action) {
+			if action.Enabled && isDeliveryAction(action) && actionMatchesOrderSpec(task, action) {
 				out = append(out, action)
 			}
 		}
@@ -660,9 +661,13 @@ func (c *Center) notifyRunNeedsReview(run db.AutomationRun, reason string) {
 	c.notifyResult(task, "needs_review", run.SentCount, "需要人工核对："+reason)
 }
 
+func isDeliveryAction(action db.AutomationAction) bool {
+	return action.ActionType == ActionSendCard || action.ActionType == ActionSendTemplate
+}
+
 func hasMatchingSendCard(task Task, actions []db.AutomationAction) bool {
 	for _, action := range actions {
-		if action.Enabled && action.ActionType == ActionSendCard && actionMatchesOrderSpec(task, action) {
+		if action.Enabled && isDeliveryAction(action) && actionMatchesOrderSpec(task, action) {
 			return true
 		}
 	}
@@ -795,6 +800,8 @@ func (c *Center) executeAction(ctx context.Context, task Task, action db.Automat
 		return 0, c.confirmShipment(ctx, task)
 	case ActionSendCard:
 		return c.sendCard(ctx, task, action)
+	case ActionSendTemplate:
+		return c.sendTemplate(ctx, task, action)
 	case ActionSendText:
 		text := renderTemplate(action.MessageTemplate, task)
 		if strings.TrimSpace(text) == "" {
@@ -994,6 +1001,99 @@ func (c *Center) sendCard(ctx context.Context, task Task, action db.AutomationAc
 		sent++
 	}
 	return sent, nil
+}
+
+func (c *Center) sendTemplate(ctx context.Context, task Task, action db.AutomationAction) (int, error) {
+	if !actionMatchesOrderSpec(task, action) {
+		return 0, nil
+	}
+	if len(action.TemplateMessages) == 0 {
+		return 0, fmt.Errorf("发货模板缺少消息")
+	}
+	values := map[string]string{}
+	type reservedCard struct {
+		cardID  int64
+		content string
+	}
+	reserved := make([]reservedCard, 0)
+	restoreReserved := func() error {
+		var restoreErr error
+		for index := len(reserved) - 1; index >= 0; index-- {
+			entry := reserved[index]
+			unlock := c.lockCard(entry.cardID)
+			err := c.store.Cards.RestoreBatchData(ctx, entry.cardID, entry.content)
+			unlock()
+			if err != nil {
+				restoreErr = errors.Join(restoreErr, err)
+			}
+		}
+		return restoreErr
+	}
+	for _, binding := range action.TemplateBindings {
+		card, err := c.store.Cards.Get(ctx, binding.CardID)
+		if err != nil {
+			return 0, err
+		}
+		if !card.Enabled || (card.Type != "text" && card.Type != "data") {
+			return 0, fmt.Errorf("模板卡密组不可用")
+		}
+		count := binding.DeliveryCount
+		if count <= 0 {
+			count = 1
+		}
+		count *= maxDeliveryQuantity(task.Quantity)
+		lines := make([]string, 0, count)
+		if card.Type == "text" {
+			for i := 0; i < count; i++ {
+				lines = append(lines, card.TextContent)
+			}
+		} else {
+			unlock := c.lockCard(card.ID)
+			for i := 0; i < count; i++ {
+				content, consumeErr := c.store.Cards.ConsumeBatchData(ctx, card.ID)
+				if consumeErr != nil {
+					unlock()
+					for _, restored := range lines {
+						reserved = append(reserved, reservedCard{cardID: card.ID, content: restored})
+					}
+					if restoreErr := restoreReserved(); restoreErr != nil {
+						return 0, uncertainAction(errors.Join(consumeErr, restoreErr))
+					}
+					return 0, consumeErr
+				}
+				lines = append(lines, content)
+				reserved = append(reserved, reservedCard{cardID: card.ID, content: content})
+			}
+			unlock()
+		}
+		values[binding.VariableKey] = strings.Join(lines, "\n")
+	}
+	sent := 0
+	for _, message := range action.TemplateMessages {
+		text := deliverytemplate.ReplaceCards(renderTemplate(message, task), values)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		if err := c.sendText(ctx, task, text); err != nil {
+			if sent == 0 && errors.Is(err, ErrMessageNotSent) {
+				if restoreErr := restoreReserved(); restoreErr != nil {
+					return 0, uncertainAction(errors.Join(err, restoreErr))
+				}
+				return 0, err
+			}
+			return sent, uncertainAction(err)
+		}
+		sent++
+	}
+	return sent, nil
+}
+
+func maxDeliveryQuantity(raw string) int {
+	qty := parsePositiveInt(raw)
+	if qty <= 0 {
+		return 1
+	}
+	return qty
 }
 
 func (c *Center) sendDataCard(ctx context.Context, task Task, card *db.CardFull, count int) (int, error) {

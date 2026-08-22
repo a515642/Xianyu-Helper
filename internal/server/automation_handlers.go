@@ -19,6 +19,11 @@ func (s *Server) mountAutomation(r chi.Router) {
 	r.Post("/automation-rules", s.createAutomationRule)
 	r.Put("/automation-rules/{rule_id}", s.updateAutomationRule)
 	r.Delete("/automation-rules/{rule_id}", s.deleteAutomationRule)
+	r.Get("/delivery-templates", s.listDeliveryTemplates)
+	r.Post("/delivery-templates", s.createDeliveryTemplate)
+	r.Get("/delivery-templates/{template_id}", s.getDeliveryTemplate)
+	r.Put("/delivery-templates/{template_id}", s.updateDeliveryTemplate)
+	r.Delete("/delivery-templates/{template_id}", s.deleteDeliveryTemplate)
 	r.Get("/automation-issues", s.listAutomationIssues)
 	r.Post("/automation-runs/{run_id}/resolve", s.resolveAutomationRun)
 	r.Post("/automation-pending-tasks/{task_id}/resolve", s.resolveDeferredAutomationTask)
@@ -80,15 +85,23 @@ func (s *Server) resolveDeferredAutomationTask(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+type automationTemplateBindingRequest struct {
+	VariableKey   string `json:"key"`
+	CardID        int64  `json:"card_id"`
+	DeliveryCount int    `json:"delivery_count"`
+}
+
 type automationActionRequest struct {
-	ActionType      string `json:"action_type"`
-	CardID          int64  `json:"card_id"`
-	DeliveryCount   int    `json:"delivery_count"`
-	MessageTemplate string `json:"message_template"`
-	DelaySeconds    int    `json:"delay_seconds"`
-	ConfigJSON      string `json:"config_json"`
-	Enabled         *bool  `json:"enabled"`
-	SortOrder       int    `json:"sort_order"`
+	ActionType         string                             `json:"action_type"`
+	CardID             int64                              `json:"card_id"`
+	DeliveryTemplateID int64                              `json:"delivery_template_id"`
+	TemplateBindings   []automationTemplateBindingRequest `json:"template_bindings"`
+	DeliveryCount      int                                `json:"delivery_count"`
+	MessageTemplate    string                             `json:"message_template"`
+	DelaySeconds       int                                `json:"delay_seconds"`
+	ConfigJSON         string                             `json:"config_json"`
+	Enabled            *bool                              `json:"enabled"`
+	SortOrder          int                                `json:"sort_order"`
 }
 
 type automationRuleRequest struct {
@@ -198,6 +211,14 @@ func automationRulesJSON(rules []db.AutomationRule) []map[string]any {
 				"card_name": action.CardName, "delivery_count": action.DeliveryCount,
 				"message_template": action.MessageTemplate, "delay_seconds": action.DelaySeconds,
 				"config_json": action.ConfigJSON, "enabled": action.Enabled, "sort_order": action.SortOrder,
+				"delivery_template_id": action.DeliveryTemplateID, "delivery_template_name": action.DeliveryTemplateName,
+				"template_bindings": func() []map[string]any {
+					bindings := make([]map[string]any, 0, len(action.TemplateBindings))
+					for _, binding := range action.TemplateBindings {
+						bindings = append(bindings, map[string]any{"key": binding.VariableKey, "card_id": binding.CardID, "card_name": binding.CardName, "delivery_count": binding.DeliveryCount})
+					}
+					return bindings
+				}(),
 			})
 		}
 		out = append(out, map[string]any{
@@ -293,6 +314,9 @@ func (s *Server) normalizeAutomationRuleRequest(r *http.Request, userID int64, r
 	if req.CookieID == "" || !s.cookieOwnedByUser(r.Context(), userID, req.CookieID) {
 		return db.AutomationRuleInput{}, errStr("账号不存在或不属于当前用户")
 	}
+	if (req.TriggerType == automation.TriggerOrderPaid || req.TriggerType == automation.TriggerBuyerReviewed) && req.ItemID == "" {
+		return db.AutomationRuleInput{}, errStr("付款发货和评价赠品规则必须选择具体商品")
+	}
 	if req.ItemID != "" && !s.itemOwnedByUser(r, userID, req.CookieID, req.ItemID) {
 		return db.AutomationRuleInput{}, errStr("商品不属于当前用户")
 	}
@@ -335,6 +359,33 @@ func (s *Server) normalizeAutomationRuleRequest(r *http.Request, userID int64, r
 				return db.AutomationRuleInput{}, errStr("API 卡密暂不支持自动发货，请选择文本、批量数据或图片卡密")
 			}
 			hasSendCard = hasSendCard || enabled
+		case automation.ActionSendTemplate:
+			if req.TriggerType != automation.TriggerOrderPaid && req.TriggerType != automation.TriggerBuyerReviewed {
+				return db.AutomationRuleInput{}, errStr("发货模板动作仅支持付款发货或评价赠品")
+			}
+			if act.DeliveryTemplateID <= 0 {
+				return db.AutomationRuleInput{}, errStr("发货模板动作必须选择发货模板")
+			}
+			template, templateErr := s.Store.DeliveryTemplates.GetForUser(r.Context(), userID, act.DeliveryTemplateID)
+			if templateErr != nil || !template.Enabled {
+				return db.AutomationRuleInput{}, errStr("发货模板不存在或已停用")
+			}
+			if len(act.TemplateBindings) != len(template.Keys) {
+				return db.AutomationRuleInput{}, errStr("发货模板的卡密变量绑定不完整")
+			}
+			seenKeys := map[string]bool{}
+			for _, binding := range act.TemplateBindings {
+				key := strings.TrimSpace(binding.VariableKey)
+				if key == "" || seenKeys[key] || !templateHasKey(template.Keys, key) || binding.CardID <= 0 {
+					return db.AutomationRuleInput{}, errStr("发货模板的卡密变量绑定无效")
+				}
+				seenKeys[key] = true
+				card, cardErr := s.Store.Cards.Get(r.Context(), binding.CardID)
+				if cardErr != nil || card.UserID != userID || !card.Enabled || (card.Type != "text" && card.Type != "data") {
+					return db.AutomationRuleInput{}, errStr("发货模板只能绑定启用的文本或批量数据卡密组")
+				}
+			}
+			hasSendCard = hasSendCard || enabled
 		case automation.ActionSendText:
 			if strings.TrimSpace(act.MessageTemplate) == "" {
 				return db.AutomationRuleInput{}, errStr("发送文本动作必须填写文案")
@@ -359,12 +410,20 @@ func (s *Server) normalizeAutomationRuleRequest(r *http.Request, userID int64, r
 			ActionType: act.ActionType, CardID: act.CardID, DeliveryCount: act.DeliveryCount,
 			MessageTemplate: act.MessageTemplate, DelaySeconds: act.DelaySeconds, ConfigJSON: act.ConfigJSON,
 			Enabled: enabled, SortOrder: firstNonZero(act.SortOrder, i+1),
+			DeliveryTemplateID: act.DeliveryTemplateID,
+			TemplateBindings: func() []db.DeliveryTemplateBinding {
+				bindings := make([]db.DeliveryTemplateBinding, 0, len(act.TemplateBindings))
+				for _, binding := range act.TemplateBindings {
+					bindings = append(bindings, db.DeliveryTemplateBinding{VariableKey: strings.TrimSpace(binding.VariableKey), CardID: binding.CardID, DeliveryCount: binding.DeliveryCount})
+				}
+				return bindings
+			}(),
 		})
 	}
 	switch req.TriggerType {
 	case automation.TriggerOrderPaid:
 		if !hasSendCard {
-			return db.AutomationRuleInput{}, errStr("付款后自动发货至少需要一个已启用的发送卡密动作")
+			return db.AutomationRuleInput{}, errStr("付款后自动发货至少需要一个已启用的发送卡密或模板动作")
 		}
 	case automation.TriggerBuyerReviewed:
 		if hasConfirmShipment {
@@ -401,6 +460,15 @@ func defaultAutomationRuleName(triggerType, itemID string) string {
 		return name + " - " + strings.TrimSpace(itemID)
 	}
 	return name
+}
+
+func templateHasKey(keys []string, target string) bool {
+	for _, key := range keys {
+		if key == target {
+			return true
+		}
+	}
+	return false
 }
 
 func isJSONObject(s string) bool {

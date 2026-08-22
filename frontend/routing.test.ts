@@ -133,6 +133,7 @@ describe('frontend navigation routing', () => {
     const rules = readFrontendFile('components/Rules.tsx');
 
     expect(rules).toContain('添加发货内容');
+    expect(rules).toContain('规则 ID: {rule.id}');
     expect(rules).toContain('{displayVariants.map((variant, index) => (');
     expect(rules).toContain(': variants.map(variant => ({');
     expect(rules).not.toContain(': (isMultiSpecRule ? variants : [variants[0]]).map');
@@ -142,9 +143,9 @@ describe('frontend navigation routing', () => {
     const itemList = readFrontendFile('components/ItemList.tsx');
 
     expect(itemList).not.toContain('条件必填');
-    expect(itemList).toContain('“付款后发送的卡密”怎么填');
-    expect(itemList).toContain('101:1:0;102:2:3');
-    expect(itemList).toContain('买家购买 3 件时会发送 6 份');
+    expect(itemList).toContain('付款发货规则ID');
+    expect(itemList).toContain('评价赠品规则ID');
+    expect(itemList).toContain('发布成功后复制规则的完整动作');
   });
 
   test('item publish image previews revoke object urls', () => {

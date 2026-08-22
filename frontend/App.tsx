@@ -7,6 +7,7 @@ import CardList from './components/CardList';
 import ItemList from './components/ItemList';
 import Settings from './components/Settings';
 import Rules from './components/Rules';
+import DeliveryTemplates from './components/DeliveryTemplates';
 import Notifications from './components/Notifications';
 import Chat from './components/Chat';
 import AIAssistants from './components/AIAssistants';
@@ -32,6 +33,7 @@ const ROUTES: Record<string, string> = {
   '/app/cards': 'cards',
   '/app/items': 'items',
   '/app/rules': 'rules',
+  '/app/delivery-templates': 'delivery-templates',
   '/app/notifications': 'notifications',
   '/app/settings': 'settings',
   '/app/ai-assistants': 'ai-assistants',
@@ -334,6 +336,7 @@ const App: React.FC = () => {
         setDeliveryRuleTarget({ cookieId: item.cookie_id, itemId: item.item_id, requestId: Date.now() });
         navigate('rules');
       }} />;
+      case 'delivery-templates': return <DeliveryTemplates />;
       case 'rules': return <Rules
         initialDeliveryTarget={deliveryRuleTarget}
         onDeliveryTargetHandled={() => setDeliveryRuleTarget(undefined)}

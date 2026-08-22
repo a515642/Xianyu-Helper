@@ -343,7 +343,7 @@ func isAPIPath(path string) bool {
 		"/api/", "/admin/", "/health", "/login", "/initialize", "/logout", "/verify",
 		"/change-password", "/change-admin-password", "/account/",
 		"/cookies", "/cookie/", "/orders", "/analytics",
-		"/cards", "/automation-rules", "/items", "/keywords", "/default-replies", "/default-reply",
+		"/cards", "/automation-rules", "/delivery-templates", "/items", "/keywords", "/default-replies", "/default-reply",
 		"/notification-channels", "/message-notifications",
 		"/system-settings", "/ai-reply", "/ai-models",
 		"/user-settings",

@@ -81,6 +81,32 @@ func TestAutomation_ListForUserAndActions(t *testing.T) {
 }
 
 // TestAutomation_MatchPriority 商品精确规则优先于账号级规则；enabled=false 不匹配。
+func TestAutomationProductTriggersDoNotFallbackToAccountRules(t *testing.T) {
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	uid, cid := seedAccount(t, s)
+	for _, trigger := range []string{"order_paid", "buyer_reviewed"} {
+		if _, err := s.Automation.Create(ctx, AutomationRuleInput{UserID: uid, CookieID: cid, ItemID: "", Name: "account", TriggerType: trigger, Enabled: true, Priority: 1, Actions: []AutomationActionInput{{ActionType: "send_text", MessageTemplate: "account", Enabled: true}}}); err != nil {
+			t.Fatal(err)
+		}
+		matched, err := s.Automation.Match(ctx, cid, "missing-item", trigger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matched) != 0 {
+			t.Fatalf("trigger=%s should not fallback to account rule: %+v", trigger, matched)
+		}
+	}
+	if _, err := s.Automation.Create(ctx, AutomationRuleInput{UserID: uid, CookieID: cid, ItemID: "", Name: "review", TriggerType: "review_missing_timeout", Enabled: true, Actions: []AutomationActionInput{{ActionType: "send_text", MessageTemplate: "review", Enabled: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := s.Automation.Match(ctx, cid, "missing-item", "review_missing_timeout")
+	if err != nil || len(matched) != 1 {
+		t.Fatalf("review reminder should retain account fallback: %+v err=%v", matched, err)
+	}
+}
+
 func TestAutomation_MatchPriority(t *testing.T) {
 	s, cleanup := newTestDB(t)
 	defer cleanup()
@@ -122,13 +148,13 @@ func TestAutomation_MatchPriority(t *testing.T) {
 	if len(matched) != 1 {
 		t.Fatalf("Match len=%d want 1（商品级存在时不叠加账号级）", len(matched))
 	}
-	// 商品级规则应排第一（CASE WHEN item_id=? THEN 0 ELSE 1 END）。
+	// 商品级规则应排第一。
 	if matched[0].ID != itemRuleID {
 		t.Fatalf("Match 顺序: first id=%d want item rule %d", matched[0].ID, itemRuleID)
 	}
 	fallback, err := s.Automation.Match(ctx, cid, "other-item", "paid")
-	if err != nil || len(fallback) != 1 || fallback[0].ItemID != "" {
-		t.Fatalf("无商品级规则时应回退账号级: %#v err=%v", fallback, err)
+	if err != nil || len(fallback) != 0 {
+		t.Fatalf("付款规则无商品级匹配时不应回退账号级: %#v err=%v", fallback, err)
 	}
 
 	// 不匹配的 trigger_type → 空。

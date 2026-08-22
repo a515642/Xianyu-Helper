@@ -257,24 +257,18 @@ func TestPublishBatchHelpers(t *testing.T) {
 	}
 }
 
-func TestParsePublishCardActions(t *testing.T) {
-	actions, parseErr := parsePublishCardActions("101:1:0; 102:2:3")
-	if parseErr != "" {
-		t.Fatalf("parsePublishCardActions: %s", parseErr)
+func TestParsePublishRuleReference(t *testing.T) {
+	ref := parsePublishRuleReference(" 101 ")
+	if ref.RuleID != 101 || ref.ParseError != "" {
+		t.Fatalf("ref=%+v", ref)
 	}
-	if len(actions) != 2 {
-		t.Fatalf("actions=%+v", actions)
+	if ref := parsePublishRuleReference("0"); ref.ParseError == "" {
+		t.Fatal("zero rule id should fail")
 	}
-	if actions[0].CardID != 101 || actions[0].DeliveryCount != 1 || actions[0].DelaySeconds != 0 {
-		t.Fatalf("actions[0]=%+v", actions[0])
+	if got := normalizePublishHeader("付款发货规则ID"); got != "paid_delivery_rule_id" {
+		t.Fatalf("normalizePublishHeader=%q", got)
 	}
-	if actions[1].CardID != 102 || actions[1].DeliveryCount != 2 || actions[1].DelaySeconds != 3 {
-		t.Fatalf("actions[1]=%+v", actions[1])
-	}
-	if _, parseErr := parsePublishCardActions("101:0"); parseErr == "" {
-		t.Fatal("每件份数为0时应返回格式错误")
-	}
-	if got := normalizePublishHeader("付款后发送的卡密"); got != "paid_delivery_contents" {
+	if got := normalizePublishHeader("评价赠品规则ID"); got != "review_gift_rule_id" {
 		t.Fatalf("normalizePublishHeader=%q", got)
 	}
 }
@@ -294,18 +288,13 @@ func TestNormalizePublishHeaderCategoryFallbackLabels(t *testing.T) {
 	}
 }
 
-func TestParsePublishAutomationSupportsMultipleCards(t *testing.T) {
-	cfg := parsePublishAutomation(map[string]any{
-		"paid_delivery_enabled":  "是",
-		"paid_delivery_contents": "101:1:0;102:2:0",
-		"review_gift_enabled":    "true",
-		"review_gift_contents":   "201:1",
-	})
-	if !cfg.PaidDelivery.Enabled || len(cfg.PaidDelivery.Actions) != 2 {
-		t.Fatalf("paid delivery=%+v", cfg.PaidDelivery)
+func TestParsePublishAutomationRuleReferences(t *testing.T) {
+	cfg := parsePublishAutomation(map[string]any{"paid_delivery_rule_id": "101", "review_gift_rule_id": "202", "review_request_enabled": "否"})
+	if cfg.SchemaVersion != 2 || cfg.PaidDelivery.RuleID != 101 || cfg.ReviewGift.RuleID != 202 {
+		t.Fatalf("cfg=%+v", cfg)
 	}
-	if !cfg.ReviewGift.Enabled || len(cfg.ReviewGift.Actions) != 1 {
-		t.Fatalf("review gift=%+v", cfg.ReviewGift)
+	if cfg.ReviewRequest.Enabled {
+		t.Fatalf("review request should be disabled: %+v", cfg.ReviewRequest)
 	}
 }
 
