@@ -24,6 +24,7 @@ describe('product scoped AI assistants', () => {
     expect(page).toContain('replaceAIForbiddenWords');
     expect(page).toContain('fetchAIModels');
     expect(page).toContain('thinking_mode');
+    expect(page).toContain('{!editing.use_system_api && <label className="flex items-center gap-3 font-bold">');
     expect(page).toContain('bargain_strategy_enabled');
     expect(page).toContain('启用砍价策略');
     expect(page).toContain('{{item_title}}');
