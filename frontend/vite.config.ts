@@ -55,6 +55,10 @@ export default defineConfig({
         target: 'http://localhost:59188',
         changeOrigin: true,
       },
+      '/delivery-templates': {
+        target: 'http://localhost:59188',
+        changeOrigin: true,
+      },
       '/automation-issues': {
         target: 'http://localhost:59188',
         changeOrigin: true,

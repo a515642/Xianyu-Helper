@@ -44,17 +44,22 @@ type AutomationRule struct {
 
 // AutomationAction 是规则下的一步动作。
 type AutomationAction struct {
-	ID              int64
-	RuleID          int64
-	ActionType      string
-	CardID          int64
-	CardName        string
-	DeliveryCount   int
-	MessageTemplate string
-	DelaySeconds    int
-	ConfigJSON      string
-	Enabled         bool
-	SortOrder       int
+	ID                   int64
+	RuleID               int64
+	ActionType           string
+	CardID               int64
+	CardName             string
+	DeliveryCount        int
+	MessageTemplate      string
+	DelaySeconds         int
+	ConfigJSON           string
+	Enabled              bool
+	SortOrder            int
+	DeliveryTemplateID   int64
+	DeliveryTemplateName string
+	TemplateMessages     []string
+	TemplateKeys         []string
+	TemplateBindings     []DeliveryTemplateBinding
 }
 
 // AutomationRun 是一次自动化执行记录。trigger_key 是持久化防重键。
@@ -170,14 +175,16 @@ func automationRuleWhere(f AutomationRuleListFilter) (string, []any) {
 
 // AutomationActionInput 是创建动作的输入。
 type AutomationActionInput struct {
-	ActionType      string
-	CardID          int64
-	DeliveryCount   int
-	MessageTemplate string
-	DelaySeconds    int
-	ConfigJSON      string
-	Enabled         bool
-	SortOrder       int
+	ActionType         string
+	CardID             int64
+	DeliveryCount      int
+	MessageTemplate    string
+	DelaySeconds       int
+	ConfigJSON         string
+	Enabled            bool
+	SortOrder          int
+	DeliveryTemplateID int64
+	TemplateBindings   []DeliveryTemplateBinding
 }
 
 // ListForUser 返回用户下全部自动化规则和动作。
@@ -265,7 +272,7 @@ SELECT r.trigger_type, COUNT(*)
 // 没有商品级规则时才回退到账号级规则，避免两层规则叠加导致重复发货。
 func (a *AutomationRules) Match(ctx context.Context, cookieID, itemID, triggerType string) ([]AutomationRule, error) {
 	out, err := a.matchScope(ctx, cookieID, itemID, triggerType)
-	if err != nil || len(out) > 0 || itemID == "" {
+	if err != nil || len(out) > 0 || itemID == "" || triggerType == "order_paid" || triggerType == "buyer_reviewed" || triggerType == "paid" {
 		return highestPriorityRule(out), err
 	}
 	out, err = a.matchScope(ctx, cookieID, "", triggerType)
@@ -375,7 +382,7 @@ UPDATE automation_rules
 		return err
 	}
 	for _, act := range in.Actions {
-		if err := insertAutomationActionTx(ctx, tx, ruleID, act); err != nil {
+		if _, err := insertAutomationActionTx(ctx, tx, a.Dialect, ruleID, act); err != nil {
 			return err
 		}
 	}
@@ -409,9 +416,11 @@ func (a *AutomationRules) Delete(ctx context.Context, userID, ruleID int64) erro
 func (a *AutomationRules) Actions(ctx context.Context, ruleID int64) ([]AutomationAction, error) {
 	rows, err := a.DB.QueryContext(ctx, `
 SELECT a.id,a.rule_id,a.action_type,COALESCE(a.card_id,0),COALESCE(c.name,''),a.delivery_count,
-       a.message_template,a.delay_seconds,a.config_json,a.enabled,a.sort_order
+       a.message_template,a.delay_seconds,a.config_json,a.enabled,a.sort_order,
+       COALESCE(a.delivery_template_id,0),COALESCE(t.name,'')
   FROM automation_rule_actions a
   LEFT JOIN cards c ON c.id=a.card_id
+  LEFT JOIN delivery_templates t ON t.id=a.delivery_template_id
  WHERE a.rule_id=?
  ORDER BY a.sort_order ASC,a.id ASC`, ruleID)
 	if err != nil {
@@ -424,10 +433,15 @@ SELECT a.id,a.rule_id,a.action_type,COALESCE(a.card_id,0),COALESCE(c.name,''),a.
 		var enabled int
 		if err := rows.Scan(&act.ID, &act.RuleID, &act.ActionType, &act.CardID, &act.CardName,
 			&act.DeliveryCount, &act.MessageTemplate, &act.DelaySeconds, &act.ConfigJSON, &enabled,
-			&act.SortOrder); err != nil {
+			&act.SortOrder, &act.DeliveryTemplateID, &act.DeliveryTemplateName); err != nil {
 			return nil, err
 		}
 		act.Enabled = enabled != 0
+		if act.DeliveryTemplateID > 0 {
+			if err := a.loadTemplateAction(ctx, &act); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, act)
 	}
 	return out, rows.Err()
@@ -1068,24 +1082,35 @@ VALUES (?,?,?,?,?,?,?,?)`,
 		return 0, err
 	}
 	for _, act := range in.Actions {
-		if err := insertAutomationActionTx(ctx, tx, id, act); err != nil {
+		if _, err := insertAutomationActionTx(ctx, tx, dialect, id, act); err != nil {
 			return 0, err
 		}
 	}
 	return id, nil
 }
 
-func insertAutomationActionTx(ctx context.Context, tx *sql.Tx, ruleID int64, act AutomationActionInput) error {
+func insertAutomationActionTx(ctx context.Context, tx *sql.Tx, dialect Dialect, ruleID int64, act AutomationActionInput) (int64, error) {
 	if act.DeliveryCount <= 0 {
 		act.DeliveryCount = 1
 	}
-	_, err := tx.ExecContext(ctx, `
+	id, err := insertReturningID(ctx, tx, dialect, `
 INSERT INTO automation_rule_actions
-    (rule_id,action_type,card_id,delivery_count,message_template,delay_seconds,config_json,enabled,sort_order)
-VALUES (?,?,?,?,?,?,?,?,?)`,
+    (rule_id,action_type,card_id,delivery_count,message_template,delay_seconds,config_json,enabled,sort_order,delivery_template_id)
+VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		ruleID, act.ActionType, nullInt64(act.CardID), act.DeliveryCount, act.MessageTemplate,
-		act.DelaySeconds, validJSON(act.ConfigJSON), boolToInt(act.Enabled), act.SortOrder)
-	return err
+		act.DelaySeconds, validJSON(act.ConfigJSON), boolToInt(act.Enabled), act.SortOrder, nullInt64(act.DeliveryTemplateID))
+	if err != nil {
+		return 0, err
+	}
+	for _, binding := range act.TemplateBindings {
+		if binding.DeliveryCount <= 0 {
+			binding.DeliveryCount = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO automation_action_template_bindings (action_id,variable_key,card_id,delivery_count) VALUES (?,?,?,?)`, id, binding.VariableKey, binding.CardID, binding.DeliveryCount); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
 }
 
 func nullInt64(v int64) any {

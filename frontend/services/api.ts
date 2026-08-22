@@ -2,7 +2,7 @@ import { get, post, put, del, postForm, type RequestControlOptions } from '../re
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
-  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType,
+  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
@@ -644,6 +644,15 @@ export const updateItem = async (cookieId: string, itemId: string, data: Partial
 }
 
 // Rules - 自动化规则
+const normalizeTemplateBindings = (bindings: any): DeliveryTemplateBinding[] => Array.isArray(bindings)
+  ? bindings.map((binding: any) => ({
+      key: binding.key || binding.variable_key || '',
+      card_id: Number(binding.card_id || 0),
+      card_name: binding.card_name || '',
+      delivery_count: Number(binding.delivery_count || 1),
+    }))
+  : [];
+
 const normalizeShippingRules = (rules: any[]): ShippingRule[] => rules.map((item: any) => ({
         id: String(item.id),
         name: item.name || '',
@@ -668,14 +677,20 @@ const normalizeShippingRules = (rules: any[]): ShippingRule[] => rules.map((item
           config_json: action.config_json || '{}',
           enabled: action.enabled !== false,
           sort_order: Number(action.sort_order || 0),
+          delivery_template_id: Number(action.delivery_template_id || 0),
+          delivery_template_name: action.delivery_template_name || '',
+          template_bindings: normalizeTemplateBindings(action.template_bindings),
         })),
         variants: (item.actions || [])
-          .filter((action: any) => action.action_type === 'send_card')
+          .filter((action: any) => action.action_type === 'send_card' || action.action_type === 'send_template')
           .map((action: any) => {
             let cfg: any = {};
             try { cfg = JSON.parse(action.config_json || '{}'); } catch {}
             return {
               id: action.id ? String(action.id) : undefined,
+              delivery_mode: action.action_type === 'send_template' ? 'template' : 'card',
+              delivery_template_id: Number(action.delivery_template_id || 0),
+              template_bindings: normalizeTemplateBindings(action.template_bindings),
               spec_name: cfg.spec_name || '',
               spec_value: cfg.spec_value || '',
               card_id: Number(action.card_id || 0),
@@ -688,6 +703,23 @@ const normalizeShippingRules = (rules: any[]): ShippingRule[] => rules.map((item
             };
           }),
     }));
+
+export const getDeliveryTemplates = async (): Promise<DeliveryTemplate[]> => {
+  const res = await get<any>('/delivery-templates');
+  return (Array.isArray(res) ? res : (res.data || res.templates || [])).map((item: any) => ({
+    ...item,
+    id: Number(item.id),
+    enabled: item.enabled !== false,
+    keys: Array.isArray(item.keys) ? item.keys : [],
+    messages: Array.isArray(item.messages) ? item.messages : [],
+  }));
+};
+
+export const createDeliveryTemplate = async (input: {name: string; enabled?: boolean; messages: Array<{content: string}>}): Promise<{id: number}> =>
+  post('/delivery-templates', input);
+export const updateDeliveryTemplate = async (id: number, input: {name: string; enabled?: boolean; messages: Array<{content: string}>}): Promise<ApiResponse> =>
+  put(`/delivery-templates/${id}`, input);
+export const deleteDeliveryTemplate = async (id: number): Promise<ApiResponse> => del(`/delivery-templates/${id}`);
 
 export const getShippingRules = async (): Promise<ShippingRule[]> => {
     const res = await get<any>('/automation-rules');
@@ -738,14 +770,14 @@ const orderAutomationActions = (triggerType: string, actions: AutomationAction[]
     if (triggerType !== 'order_paid') {
       return actions.map((action, index) => ({ ...action, sort_order: action.sort_order || index + 1 }));
     }
-    const sendCards = actions
-      .filter(action => action.action_type === 'send_card')
+    const deliveryActions = actions
+      .filter(action => action.action_type === 'send_card' || action.action_type === 'send_template')
       .map((action, index) => ({ ...action, sort_order: index + 1 }));
-    const others = actions.filter(action => action.action_type !== 'send_card' && action.action_type !== 'confirm_shipment');
+    const others = actions.filter(action => action.action_type !== 'send_card' && action.action_type !== 'send_template' && action.action_type !== 'confirm_shipment');
     return [
-      ...sendCards,
-      ...others.map((action, index) => ({ ...action, sort_order: sendCards.length + index + 1 })),
-      { action_type: 'confirm_shipment' as const, enabled: true, sort_order: sendCards.length + others.length + 1 },
+      ...deliveryActions,
+      ...others.map((action, index) => ({ ...action, sort_order: deliveryActions.length + index + 1 })),
+      { action_type: 'confirm_shipment' as const, enabled: true, sort_order: deliveryActions.length + others.length + 1 },
     ];
 };
 
@@ -760,11 +792,13 @@ export const updateShippingRule = async (rule: Partial<ShippingRule>): Promise<a
       triggerName[triggerType] || '自动化规则',
       rule.item_title || rule.item_id || rule.cookie_id || '',
     ].filter(Boolean).join(' - ');
-    const preservedNonCardActions = (rule.actions || []).filter(action => action.action_type !== 'send_card' && action.action_type !== 'confirm_shipment');
+    const preservedNonCardActions = (rule.actions || []).filter(action => action.action_type !== 'send_card' && action.action_type !== 'send_template' && action.action_type !== 'confirm_shipment');
     const baseActions: AutomationAction[] = rule.variants && rule.variants.length > 0
       ? [...rule.variants.map((variant, index) => ({
-            action_type: 'send_card' as const,
+            action_type: (variant.delivery_mode === 'template' ? 'send_template' : 'send_card') as AutomationAction['action_type'],
             card_id: variant.card_id,
+            delivery_template_id: variant.delivery_template_id || 0,
+            template_bindings: variant.template_bindings || [],
             delivery_count: variant.delivery_count || 1,
             enabled: variant.enabled !== false,
             sort_order: index + 1,
@@ -794,6 +828,8 @@ export const updateShippingRule = async (rule: Partial<ShippingRule>): Promise<a
         actions: actions.map((action, index) => ({
           action_type: action.action_type,
           card_id: action.card_id || 0,
+          delivery_template_id: action.delivery_template_id || 0,
+          template_bindings: normalizeTemplateBindings(action.template_bindings),
           delivery_count: action.delivery_count || 1,
           message_template: action.message_template || '',
           delay_seconds: action.delay_seconds || 0,
@@ -806,6 +842,29 @@ export const updateShippingRule = async (rule: Partial<ShippingRule>): Promise<a
 }
 
 export const deleteShippingRule = async (id: string): Promise<any> => del(`/automation-rules/${id}`);
+
+export interface BatchShippingRuleResult {
+  item_id: string;
+  item_title: string;
+  success: boolean;
+  error?: string;
+  id?: string;
+}
+
+export const applyShippingRuleToItems = async (rule: Partial<ShippingRule>, itemIDs: string[]): Promise<BatchShippingRuleResult[]> => {
+  const uniqueIDs = Array.from(new Set(itemIDs.filter(Boolean)));
+  const results: BatchShippingRuleResult[] = [];
+  for (const itemID of uniqueIDs) {
+    const itemTitle = (rule as any).item_titles?.[itemID] || itemID;
+    try {
+      const response = await updateShippingRule({ ...rule, id: undefined, item_id: itemID, item_title: itemTitle });
+      results.push({ item_id: itemID, item_title: itemTitle, success: true, id: response?.id ? String(response.id) : undefined });
+    } catch (error) {
+      results.push({ item_id: itemID, item_title: itemTitle, success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
+};
 
 export interface AutomationRunIssue {
   id: number;

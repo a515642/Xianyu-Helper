@@ -25,6 +25,7 @@ const (
 
 	ActionConfirmShipment = "confirm_shipment"
 	ActionSendCard        = "send_card"
+	ActionSendTemplate    = "send_template"
 	ActionSendText        = "send_text"
 )
 

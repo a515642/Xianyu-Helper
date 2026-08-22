@@ -37,6 +37,18 @@ interface PublishCategory {
   tb_cat_id?: string;
 }
 
+interface PublishAutomationReference {
+  rule_id?: number;
+  source_rule_snapshot?: { id?: number; name?: string; item_id?: string; trigger_type?: string };
+  parse_error?: string;
+}
+
+interface PublishAutomationConfig {
+  schema_version?: number;
+  paid_delivery?: PublishAutomationReference;
+  review_gift?: PublishAutomationReference;
+}
+
 interface PublishBatchPreviewRow {
   row_no: number;
   valid: boolean;
@@ -47,6 +59,7 @@ interface PublishBatchPreviewRow {
   quantity: number;
   images: string[];
   category: PublishCategory;
+  automation?: PublishAutomationConfig;
 }
 
 interface PublishBatchDetailRow {
@@ -63,6 +76,7 @@ interface PublishBatchDetailRow {
   failure_kind: string;
   images?: string[];
   category: PublishCategory;
+  automation?: PublishAutomationConfig;
 }
 
 interface PublishBatchDetail {
@@ -498,12 +512,12 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
     const headers = [
       '账号ID', '标题', '描述', '价格', '原价', '库存', '邮费模式', '邮费', '图片',
       '类目ID', '类目名称', '频道类目ID', '淘宝类目ID',
-      '付款发货启用', '付款发货内容', '评价赠品启用', '评价赠品内容',
+      '付款发货规则ID', '评价赠品规则ID',
       '求评价启用', '求评价等待小时', '求评价文案', '求评价最多次数',
     ];
     const rows = [
-      ['', '会员组合包自动发货', '下单后发送主卡和附赠卡。', '19.90', '29.90', '10', 'free', '', 'images/bundle-1.jpg;images/bundle-2.jpg', '', '', '', '', '是', '101:1;102:1', '是', '201:1;202:2', '是', '72', '亲，满意的话麻烦给个评价，谢谢～', '1'],
-      ['', '普通商品', '仅发布商品，不创建自动化规则。', '49.90', '', '10', 'fixed', '8.00', 'https://example.com/product.jpg', '', '', '', '', '否', '', '否', '', '否', '', '', ''],
+      ['', '会员组合包自动发货', '下单后发送主卡和附赠卡。', '19.90', '29.90', '10', 'free', '', 'images/bundle-1.jpg;images/bundle-2.jpg', '', '', '', '', '123', '456', '是', '72', '亲，满意的话麻烦给个评价，谢谢～', '1'],
+      ['', '普通商品', '仅发布商品，不创建自动化规则。', '49.90', '', '10', 'fixed', '8.00', 'https://example.com/product.jpg', '', '', '', '', '', '', '否', '', '', ''],
     ];
     const csv = [headers, ...rows]
       .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
@@ -1107,23 +1121,23 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                     </div>
 
                     <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-xs text-blue-950">
-                      <div className="text-sm font-extrabold">“付款后发送的卡密”怎么填</div>
+                      <div className="text-sm font-extrabold">批量铺货如何配置自动化</div>
                       <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
                         <div className="rounded-lg bg-white/80 p-3">
-                          <code className="font-bold text-blue-700">101</code>
-                          <p className="mt-1 leading-5">从卡密组 101 立即发送 1 份。卡密组 ID 可以在“卡密库存”页面查看。</p>
+                          <code className="font-bold text-blue-700">123</code>
+                          <p className="mt-1 leading-5">在“自动化规则”页面找到已创建的付款后自动发货商品级规则，填写它的规则 ID。</p>
                         </div>
                         <div className="rounded-lg bg-white/80 p-3">
-                          <code className="font-bold text-blue-700">101:2</code>
-                          <p className="mt-1 leading-5">每购买 1 件，就从卡密组 101 发送 2 份。买家购买 3 件时会发送 6 份。</p>
+                          <code className="font-bold text-blue-700">456</code>
+                          <p className="mt-1 leading-5">评价赠品同样填写已创建的评价后发送赠品商品级规则 ID。</p>
                         </div>
                         <div className="rounded-lg bg-white/80 p-3">
-                          <code className="font-bold text-blue-700">101:1:0;102:2:3</code>
-                          <p className="mt-1 leading-5">先立即发送卡密组 101 的 1 份，再等待 3 秒发送卡密组 102 的 2 份。</p>
+                          <code className="font-bold text-gray-500">留空</code>
+                          <p className="mt-1 leading-5">留空表示该商品不创建对应自动化规则；系统会在发布成功后复制规则的完整动作。</p>
                         </div>
                       </div>
                       <p className="mt-3 leading-5 text-blue-800">
-                        每一组依次写“卡密组 ID : 每件发送几份 : 等待几秒”。份数不写时按 1 份处理，等待时间不写时立即发送。需要发送多种卡密时，用英文分号 <code className="font-bold">;</code> 隔开。
+                        批量铺货不再填写卡密组 ID 或卡密串。规则 ID 会在预检时按当前行账号校验，发布成功后以新商品 ID 创建独立规则，源规则后续修改不会影响本批次。
                       </p>
                     </div>
                     <div className="overflow-x-auto rounded-xl border border-gray-100 bg-white">
@@ -1150,10 +1164,8 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                             ['类目名称', '填写了“类目ID”时必填', '填写该 ID 对应的准确类目名称'],
                             ['频道类目ID', '覆盖类目时必填', '必须填写闲鱼返回的准确频道类目 ID'],
                             ['淘宝类目ID', '按闲鱼返回填写', '“电子资料”无淘宝类目 ID，保持为空'],
-                            ['付款发货启用', '需要付款后自动发货时填写', '填“是”表示开启；不需要时填“否”或留空'],
-                            ['付款发货内容', '“付款发货启用”填“是”时填写', '从“卡密库存”页面取得卡密组 ID，按上方示例填写'],
-                            ['评价赠品启用', '需要评价赠品时填写', '填“是”表示开启；不需要时填“否”或留空'],
-                            ['评价赠品内容', '“评价赠品启用”填“是”时填写', '格式和付款发货内容相同，也可以同时发送多个卡密组'],
+                            ['付款发货规则ID', '需要付款后自动发货时填写', '填写“自动化规则”列表中可复制的付款后自动发货商品级规则 ID；留空表示不创建'],
+                            ['评价赠品规则ID', '需要评价赠品时填写', '填写“自动化规则”列表中可复制的评价后发送赠品商品级规则 ID；留空表示不创建'],
                             ['求评价启用', '需要自动求评价时填写', '填“是”表示开启；不需要时填“否”或留空'],
                             ['求评价等待小时', '“求评价启用”填“是”时填写', '填写等待小时数；留空按 72 小时处理'],
                             ['求评价文案', '“求评价启用”填“是”时填写', '填写要发送给买家的求评价消息'],

@@ -189,14 +189,18 @@ func normalizePublishHeader(header string) string {
 		return "channel_category_id"
 	case "tbcategoryid", "tbcatid", "淘宝类目id":
 		return "tb_category_id"
+	case "paiddeliveryruleid", "付款发货规则id", "付款后自动发货规则id":
+		return "paid_delivery_rule_id"
 	case "paiddeliveryenabled", "付款发货启用", "付款后自动发货":
-		return "paid_delivery_enabled"
+		return "deprecated_paid_delivery_config"
 	case "paiddeliverycontents", "付款发货内容", "付款后发送的卡密":
-		return "paid_delivery_contents"
+		return "deprecated_paid_delivery_config"
+	case "reviewgiftruleid", "评价赠品规则id", "评价后发送赠品规则id":
+		return "review_gift_rule_id"
 	case "reviewgiftenabled", "评价赠品启用", "评价后发送赠品":
-		return "review_gift_enabled"
+		return "deprecated_review_gift_config"
 	case "reviewgiftcontents", "评价赠品内容", "评价后发送的卡密":
-		return "review_gift_contents"
+		return "deprecated_review_gift_config"
 	case "reviewrequestenabled", "求评价启用", "超时未评价时提醒":
 		return "review_request_enabled"
 	case "reviewrequestafterhours", "求评价等待小时", "发货几小时后提醒":

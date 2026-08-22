@@ -504,7 +504,16 @@ func TestCreatePublishAutomationRules(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 	cardID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "卡", Type: "text", TextContent: "K", Enabled: true, UserID: admin.ID})
 
-	automationJSON := `{"paid_delivery":{"enabled":true,"actions":[{"card_id":` + itoa(cardID) + `,"delivery_count":1,"delay_seconds":23}]}}`
+	sourceRuleID, err := store.Automation.Create(ctx, db.AutomationRuleInput{UserID: admin.ID, CookieID: "acc1", ItemID: "source-item", Name: "source", TriggerType: automation.TriggerOrderPaid, Enabled: true, Actions: []db.AutomationActionInput{{ActionType: automation.ActionSendCard, CardID: cardID, DeliveryCount: 1, DelaySeconds: 23, ConfigJSON: `{"delay_override":true}`, Enabled: true, SortOrder: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRule, err := store.Automation.Get(ctx, sourceRuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := json.Marshal(sourceRule)
+	automationJSON := `{"schema_version":2,"paid_delivery":{"rule_id":` + itoa(sourceRuleID) + `,"source_rule_snapshot":` + string(snapshot) + `}}`
 	if err := srv.createPublishAutomationRules(ctx, admin.ID, db.ItemPublishBatchRow{
 		CookieID: "acc1", Title: "商品A", AutomationJSON: automationJSON,
 	}, &mtop.PublishItemResult{ItemID: "published-delay-item", Title: "商品A"}); err != nil {

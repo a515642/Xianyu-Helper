@@ -5,6 +5,7 @@ import {
   AutomationAction,
   AutomationTriggerType,
   Card,
+  DeliveryTemplate,
   DefaultReply,
   Item,
   ReplyRule,
@@ -18,6 +19,7 @@ import {
   deleteShippingRule,
   getAccountDetails,
   getCards,
+  getDeliveryTemplates,
   getDefaultReplies,
   getDefaultReply,
   getItems,
@@ -25,6 +27,7 @@ import {
   getReplyRules,
   getShippingRules,
   getShippingRulesPage,
+  applyShippingRuleToItems,
   updateDefaultReply,
   updateReplyRule,
   updateShippingRule,
@@ -63,6 +66,7 @@ import {
 import { commitIfLatest } from './latestRequest';
 
 type RulesTab = 'automation' | 'reply' | 'default';
+type DeliveryScope = 'account' | 'items';
 
 interface RulesProps {
   initialDeliveryTarget?: {
@@ -123,6 +127,9 @@ const reviewRequestText = '亲，商品使用满意的话，麻烦给个评价�
 const emptyVariant = (): ShippingVariant => ({
   spec_name: '',
   spec_value: '',
+  delivery_mode: 'card',
+  delivery_template_id: 0,
+  template_bindings: [],
   card_id: 0,
   delivery_count: 1,
   enabled: true,
@@ -192,9 +199,11 @@ const actionSummary = (rule: ShippingRule) => {
   if (rule.trigger_type === 'review_missing_timeout') {
     return rule.actions?.find(action => action.action_type === 'send_text')?.message_template || '发送求评价文案';
   }
-  const cards = (rule.actions || []).filter(action => action.action_type === 'send_card');
-  if (!cards.length) return '未配置卡密库存';
-  return cards.map(action => action.card_name || `卡密 ${action.card_id}`).join(' / ');
+  const deliveries = (rule.actions || []).filter(action => action.action_type === 'send_card' || action.action_type === 'send_template');
+  if (!deliveries.length) return '未配置发货内容';
+  return deliveries.map(action => action.action_type === 'send_template'
+    ? action.delivery_template_name || `发货模板 ${action.delivery_template_id || ''}`
+    : action.card_name || `卡密 ${action.card_id}`).join(' / ');
 };
 
 const accentClasses = (accent: TriggerMeta['accent'], selected = false) => {
@@ -211,6 +220,15 @@ const statusPill = (enabled: boolean) =>
 
 const accountLabel = (account?: AccountDetail) => account?.nickname || account?.remark || account?.id || '未知账号';
 
+const copyRuleID = async (id: string) => {
+  try {
+    await navigator.clipboard.writeText(id);
+    alert(`规则 ID ${id} 已复制`);
+  } catch {
+    alert(`规则 ID：${id}`);
+  }
+};
+
 const boolFlag = (value: unknown): boolean => value === true || value === 1 || value === '1';
 
 const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHandled }) => {
@@ -221,6 +239,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const [defaultReplies, setDefaultReplies] = useState<Record<string, DefaultReply>>({});
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
+  const [deliveryTemplates, setDeliveryTemplates] = useState<DeliveryTemplate[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState('');
@@ -242,6 +261,9 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const [showReplyModal, setShowReplyModal] = useState(false);
   const [showDefaultModal, setShowDefaultModal] = useState(false);
   const [editingAutomationRule, setEditingAutomationRule] = useState<Partial<ShippingRule> | null>(null);
+  const [deliveryScope, setDeliveryScope] = useState<DeliveryScope>('items');
+  const [selectedDeliveryItemIds, setSelectedDeliveryItemIds] = useState<string[]>([]);
+  const [deliveryItemSearch, setDeliveryItemSearch] = useState('');
   const [editingReplyRule, setEditingReplyRule] = useState<Partial<ReplyRule> | null>(null);
   const [defaultForm, setDefaultForm] = useState<DefaultReplyForm>({
     cookie_id: '',
@@ -253,14 +275,16 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const selectedAccount = accounts.find(account => account.id === selectedAccountId);
 
   const loadReferenceData = useCallback(async () => {
-    const [accountList, cardList, itemList, defaultReplyMap] = await Promise.all([
+    const [accountList, cardList, templateList, itemList, defaultReplyMap] = await Promise.all([
       getAccountDetails(),
       getCards(),
+      getDeliveryTemplates(),
       getItems(),
       getDefaultReplies(),
     ]);
     setAccounts(accountList);
     setCards(cardList);
+    setDeliveryTemplates(templateList);
     setItems(itemList);
     setDefaultReplies(defaultReplyMap);
     setSelectedAccountId(current => current || accountList[0]?.id || '');
@@ -374,15 +398,22 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
 
   const modalAccountItems = useMemo(() => {
     const cookieID = editingAutomationRule?.cookie_id || selectedAccountId;
+    const search = deliveryItemSearch.trim().toLowerCase();
+    return items.filter(item => item.cookie_id === cookieID && (!search || `${item.item_title || ''} ${item.item_id}`.toLowerCase().includes(search)));
+  }, [deliveryItemSearch, editingAutomationRule?.cookie_id, items, selectedAccountId]);
+  const allModalAccountItems = useMemo(() => {
+    const cookieID = editingAutomationRule?.cookie_id || selectedAccountId;
     return items.filter(item => item.cookie_id === cookieID);
   }, [editingAutomationRule?.cookie_id, items, selectedAccountId]);
 
   const selectedRuleItem = useMemo(() => {
-    if (!editingAutomationRule?.cookie_id || !editingAutomationRule?.item_id) return undefined;
-    return items.find(item => item.cookie_id === editingAutomationRule.cookie_id && item.item_id === editingAutomationRule.item_id);
-  }, [editingAutomationRule?.cookie_id, editingAutomationRule?.item_id, items]);
-
-  const isMultiSpecRule = boolFlag(selectedRuleItem?.is_multi_spec);
+    const cookieID = editingAutomationRule?.cookie_id;
+    const itemID = editingAutomationRule?.item_id || (selectedDeliveryItemIds.length === 1 ? selectedDeliveryItemIds[0] : '');
+    if (!cookieID || !itemID) return undefined;
+    return items.find(item => item.cookie_id === cookieID && item.item_id === itemID);
+  }, [editingAutomationRule?.cookie_id, editingAutomationRule?.item_id, items, selectedDeliveryItemIds]);
+  const selectedDeliveryItems = useMemo(() => allModalAccountItems.filter(item => selectedDeliveryItemIds.includes(item.item_id)), [allModalAccountItems, selectedDeliveryItemIds]);
+  const isMultiSpecRule = boolFlag(selectedRuleItem?.is_multi_spec) || selectedDeliveryItems.some(item => boolFlag(item.is_multi_spec));
   const currentTrigger = (editingAutomationRule?.trigger_type || 'order_paid') as AutomationTriggerType;
   const currentMeta = triggerMeta[currentTrigger];
   const reviewConfig = parseJSONObject(editingAutomationRule?.config_json);
@@ -412,6 +443,9 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
 
   const openAutomationRule = useCallback((rule: ShippingRule) => {
     const trigger = (rule.trigger_type || 'order_paid') as AutomationTriggerType;
+    setDeliveryScope('items');
+    setSelectedDeliveryItemIds(rule.item_id ? [rule.item_id] : []);
+    setDeliveryItemSearch('');
     setEditingAutomationRule({
       ...rule,
       trigger_type: trigger,
@@ -431,11 +465,15 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
       setSelectedAccountId(initialDeliveryTarget.cookieId);
       setLoading(true);
       try {
-        const [ruleList, itemList, cardList] = await Promise.all([
+        const [ruleList, itemList, cardList, templateList] = await Promise.all([
           getShippingRules(),
           getItems(),
           getCards().catch(error => {
             console.warn('加载卡密库存失败，不阻断打开自动化规则', error);
+            return [];
+          }),
+          getDeliveryTemplates().catch(error => {
+            console.warn('加载发货模板失败，不阻断打开自动化规则', error);
             return [];
           }),
         ]);
@@ -443,6 +481,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
         setAutomationRules(ruleList);
         setItems(itemList);
         setCards(cardList);
+        setDeliveryTemplates(templateList);
         const rule = ruleList.find(candidate =>
           candidate.cookie_id === initialDeliveryTarget.cookieId &&
           candidate.item_id === initialDeliveryTarget.itemId &&
@@ -455,6 +494,9 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
             candidate.cookie_id === initialDeliveryTarget.cookieId &&
             candidate.item_id === initialDeliveryTarget.itemId
           );
+          setDeliveryScope('items');
+          setSelectedDeliveryItemIds([initialDeliveryTarget.itemId]);
+          setDeliveryItemSearch('');
           setEditingAutomationRule({
             ...buildAutomationDraft('order_paid', initialDeliveryTarget.cookieId, initialDeliveryTarget.itemId),
             item_title: item?.item_title || '',
@@ -483,12 +525,16 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
       alert('请先选择账号');
       return;
     }
+    setDeliveryScope('items');
+    setSelectedDeliveryItemIds([]);
+    setDeliveryItemSearch('');
     setEditingAutomationRule(buildAutomationDraft(trigger));
     setShowAutomationModal(true);
   };
 
   const handleTriggerChange = (trigger: AutomationTriggerType) => {
     if (!editingAutomationRule) return;
+    const productScopedTrigger = trigger === 'order_paid' || trigger === 'buyer_reviewed';
     const currentCardID =
       editingAutomationRule.variants?.find(variant => variant.card_id)?.card_id ||
       editingAutomationRule.actions?.find(action => action.action_type === 'send_card')?.card_id ||
@@ -508,6 +554,12 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
         ? []
         : (editingAutomationRule.variants?.length ? editingAutomationRule.variants : [{ ...emptyVariant(), card_id: currentCardID }]),
     });
+    if (productScopedTrigger) {
+      setDeliveryScope('items');
+      if (selectedDeliveryItemIds.length === 0 && editingAutomationRule.item_id) {
+        setSelectedDeliveryItemIds([editingAutomationRule.item_id]);
+      }
+    }
   };
 
   const handleAutomationItemChange = (itemID: string) => {
@@ -532,6 +584,21 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     ? editingAutomationRule.variants
     : [emptyVariant()];
 
+  const templateKeys = (templateID?: number) => deliveryTemplates.find(template => template.id === Number(templateID))?.keys || [];
+  const bindingsForTemplate = (templateID?: number, previous: ShippingVariant['template_bindings'] = []) =>
+    templateKeys(templateID).map(key => {
+      const old = previous.find(binding => binding.key === key);
+      return { key, card_id: old?.card_id || 0, delivery_count: Math.max(1, old?.delivery_count || 1) };
+    });
+  const updateDeliveryMode = (index: number, mode: 'card' | 'template') => {
+    if (mode === 'card') updateVariant(index, { delivery_mode: 'card', delivery_template_id: 0, template_bindings: [] });
+    else updateVariant(index, { delivery_mode: 'template', card_id: 0, delivery_template_id: 0, template_bindings: [] });
+  };
+  const updateTemplateForVariant = (index: number, templateID: number) => {
+    const current = displayVariants[index];
+    updateVariant(index, { delivery_mode: 'template', card_id: 0, delivery_template_id: templateID, template_bindings: bindingsForTemplate(templateID, current.template_bindings) });
+  };
+
   const updateVariant = (index: number, patch: Partial<ShippingVariant>) => {
     if (!editingAutomationRule) return;
     const next = displayVariants.map((variant, variantIndex) =>
@@ -540,7 +607,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     setEditingAutomationRule({
       ...editingAutomationRule,
       variants: next,
-      card_group_id: next[0]?.card_id || 0,
+      card_group_id: next[0]?.delivery_mode === 'template' ? 0 : (next[0]?.card_id || 0),
     });
   };
 
@@ -569,10 +636,30 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     }
 
     const variants = editingAutomationRule.variants?.length ? editingAutomationRule.variants : [];
+    if ((trigger === 'order_paid' || trigger === 'buyer_reviewed') && (deliveryScope !== 'items' || selectedDeliveryItemIds.length === 0)) {
+      alert('付款发货和评价赠品必须选择至少一个具体商品');
+      return;
+    }
     if (trigger !== 'review_missing_timeout') {
-      if (!variants.length || variants.some(variant => !variant.card_id)) {
-        alert(trigger === 'buyer_reviewed' ? '请选择评价赠品卡密库存' : '请选择发货卡密库存');
+      if (!variants.length) {
+        alert('至少需要一条发货内容');
         return;
+      }
+      for (const variant of variants) {
+        const mode = variant.delivery_mode || 'card';
+        if (mode === 'card') {
+          if (!variant.card_id) { alert(trigger === 'buyer_reviewed' ? '请选择评价赠品卡密库存' : '请选择发货卡密库存'); return; }
+        } else {
+          if (trigger !== 'order_paid' && trigger !== 'buyer_reviewed') { alert('发货模板仅支持付款发货或评价赠品'); return; }
+          const template = deliveryTemplates.find(item => item.id === Number(variant.delivery_template_id));
+          if (!template || !template.enabled) { alert('请选择启用中的发货模板'); return; }
+          const bindings = variant.template_bindings || [];
+          if (bindings.length !== template.keys.length || template.keys.some(key => {
+            const binding = bindings.find(item => item.key === key);
+            const card = binding ? cards.find(item => item.id === binding.card_id) : undefined;
+            return !binding || !binding.card_id || !card || !card.enabled || (card.type !== 'text' && card.type !== 'data') || binding.delivery_count < 1;
+          })) { alert('请为模板中的每个卡密引用选择启用的文本或批量数据卡密组'); return; }
+        }
       }
       if (isMultiSpecRule && variants.some(variant => !variant.spec_name.trim() || !variant.spec_value.trim())) {
         alert('多规格商品必须填写每一行的规格名称和规格值');
@@ -592,29 +679,42 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
       ? []
       : variants.map(variant => ({
         ...variant,
+        delivery_mode: variant.delivery_mode || 'card',
         spec_name: isMultiSpecRule ? variant.spec_name.trim() : '',
         spec_value: isMultiSpecRule ? variant.spec_value.trim() : '',
-        delivery_count: Math.max(1, Number(variant.delivery_count) || 1),
+        delivery_count: variant.delivery_mode === 'template' ? 1 : Math.max(1, Number(variant.delivery_count) || 1),
+        template_bindings: variant.delivery_mode === 'template' ? (variant.template_bindings || []).map(binding => ({ ...binding, delivery_count: Math.max(1, Number(binding.delivery_count) || 1) })) : [],
         enabled: variant.enabled !== false,
       }));
 
     try {
-      await updateShippingRule({
+      const draft: Partial<ShippingRule> = {
         ...editingAutomationRule,
+        id: deliveryScope === 'items' && selectedDeliveryItemIds.length > 1 ? undefined : editingAutomationRule.id,
         trigger_type: trigger,
-        name: (editingAutomationRule.name || '').trim() ||
-          defaultRuleName(trigger, selectedRuleItem?.item_title || editingAutomationRule.item_id || ''),
-        config_json: trigger === 'review_missing_timeout'
-          ? buildReviewConfig(editingAutomationRule.config_json)
-          : (editingAutomationRule.config_json || '{}'),
-        actions: editingAutomationRule.actions?.length
-          ? editingAutomationRule.actions
-          : cardActionsForTrigger(trigger, saveVariants[0]?.card_id || editingAutomationRule.card_group_id || 0),
+        name: (editingAutomationRule.name || '').trim() || defaultRuleName(trigger, selectedRuleItem?.item_title || editingAutomationRule.item_id || ''),
+        config_json: trigger === 'review_missing_timeout' ? buildReviewConfig(editingAutomationRule.config_json) : (editingAutomationRule.config_json || '{}'),
+        actions: editingAutomationRule.actions?.length ? editingAutomationRule.actions : cardActionsForTrigger(trigger, saveVariants[0]?.card_id || editingAutomationRule.card_group_id || 0),
         variants: saveVariants,
-      });
-      setShowAutomationModal(false);
-      await Promise.all([loadAutomationRules(), loadReferenceData()]);
-      alert('保存成功');
+      };
+      if (deliveryScope === 'items' && selectedDeliveryItemIds.length > 1) {
+        const itemTitles = Object.fromEntries(allModalAccountItems.map(item => [item.item_id, item.item_title || item.item_id]));
+        const results = await applyShippingRuleToItems({ ...draft, item_titles: itemTitles } as any, selectedDeliveryItemIds);
+        const failed = results.filter(result => !result.success);
+        if (failed.length) {
+          alert(`已应用 ${results.length - failed.length} 个商品，${failed.length} 个失败：\n${failed.map(result => `${result.item_title}：${result.error}`).join('\n')}`);
+          await loadAutomationRules();
+          return;
+        }
+        setShowAutomationModal(false);
+        await Promise.all([loadAutomationRules(), loadReferenceData()]);
+        alert(`已将规则应用到 ${results.length} 个商品`);
+      } else {
+        await updateShippingRule({ ...draft, item_id: deliveryScope === 'account' ? '' : (selectedDeliveryItemIds[0] || editingAutomationRule.item_id || '') });
+        setShowAutomationModal(false);
+        await Promise.all([loadAutomationRules(), loadReferenceData()]);
+        alert('保存成功');
+      }
     } catch (error) {
       console.error('保存自动化规则失败:', error);
       alert('保存失败：' + (error as Error).message);
@@ -1041,6 +1141,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                             </span>
                           </div>
                           <div className="flex flex-wrap gap-2 text-xs font-bold">
+                            <button type="button" onClick={() => void copyRuleID(rule.id)} className="rounded-lg bg-slate-900 px-2.5 py-1 font-mono text-white hover:bg-slate-700" title="复制规则 ID">规则 ID: {rule.id}</button>
                             <span className="px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600">{meta.label}</span>
                             <span className="px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600">{rule.item_title || rule.item_id || '账号级规则'}</span>
                             <span className="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700">{actionSummary(rule)}</span>
@@ -1242,7 +1343,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
           <div className="modal-container" style={{ maxWidth: '72rem', maxHeight: '92vh' }}>
             <div className="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
               <div>
-                <h3 className="text-2xl font-black text-gray-900">{editingAutomationRule.id ? '编辑自动化规则' : '新建自动化规则'}</h3>
+                <h3 className="text-2xl font-black text-gray-900">{editingAutomationRule.id ? '编辑自动化规则' : '新建自动化规则'} {editingAutomationRule.id && <button type="button" onClick={() => void copyRuleID(String(editingAutomationRule.id))} className="ml-2 rounded-lg bg-slate-900 px-2 py-1 align-middle font-mono text-xs text-white">规则 ID: {editingAutomationRule.id}</button>}</h3>
                 <p className="text-sm text-gray-500 mt-1">{currentMeta.description}</p>
               </div>
               <button
@@ -1318,13 +1419,18 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                         <label className="block text-sm font-bold text-gray-700 mb-2">闲鱼账号</label>
                         <select
                           value={editingAutomationRule.cookie_id || ''}
-                          onChange={event => setEditingAutomationRule({
-                            ...editingAutomationRule,
-                            cookie_id: event.target.value,
-                            item_id: '',
-                            item_title: '',
-                            item_keyword: '',
-                          })}
+                          onChange={event => {
+                            setEditingAutomationRule({
+                              ...editingAutomationRule,
+                              cookie_id: event.target.value,
+                              item_id: '',
+                              item_title: '',
+                              item_keyword: '',
+                            });
+                            setSelectedDeliveryItemIds([]);
+                            setDeliveryScope('items');
+                            setDeliveryItemSearch('');
+                          }}
                           className="w-full ios-input px-4 py-3 rounded-xl"
                         >
                           <option value="">选择账号</option>
@@ -1334,18 +1440,47 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                         </select>
                       </div>
                       <div>
-                        <label className="block text-sm font-bold text-gray-700 mb-2">关联商品</label>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">应用范围</label>
                         <select
-                          value={editingAutomationRule.item_id || ''}
-                          onChange={event => handleAutomationItemChange(event.target.value)}
+                          value={(currentTrigger === 'order_paid' || currentTrigger === 'buyer_reviewed') ? 'items' : deliveryScope}
+                          onChange={event => {
+                            const scope = event.target.value as DeliveryScope;
+                            setDeliveryScope(scope);
+                            if (scope === 'account') {
+                              setSelectedDeliveryItemIds([]);
+                              setEditingAutomationRule({ ...editingAutomationRule, item_id: '', item_title: '', item_keyword: '' });
+                            } else if (selectedDeliveryItemIds.length === 0 && editingAutomationRule.item_id) {
+                              setSelectedDeliveryItemIds([editingAutomationRule.item_id]);
+                            }
+                          }}
                           className="w-full ios-input px-4 py-3 rounded-xl"
                         >
-                          <option value="">账号级规则（不限定商品）</option>
-                          {modalAccountItems.map(item => (
-                            <option key={`${item.cookie_id}-${item.item_id}`} value={item.item_id}>{item.item_title || item.item_id}</option>
-                          ))}
+                          <option value="items">指定商品（可多选）</option>
+                          {currentTrigger === 'review_missing_timeout' && <option value="account">账号级规则（包含未来新增商品）</option>}
                         </select>
                       </div>
+                      {deliveryScope === 'items' && (
+                        <div className="md:col-span-2 rounded-2xl border border-gray-100 bg-gray-50 p-3">
+                          <div className="mb-2 flex items-center justify-between gap-3 text-xs font-bold text-gray-600">
+                            <span>已选 {selectedDeliveryItemIds.length} 个商品</span>
+                            <span>{modalAccountItems.length} 个匹配结果</span>
+                          </div>
+                          <input value={deliveryItemSearch} onChange={event => setDeliveryItemSearch(event.target.value)} placeholder="搜索商品名称或 ID" className="ios-input mb-2 w-full rounded-xl px-3 py-2" />
+                          <div className="mb-2 flex flex-wrap gap-2">
+                            <button type="button" onClick={() => setSelectedDeliveryItemIds(Array.from(new Set([...selectedDeliveryItemIds, ...modalAccountItems.map(item => item.item_id)])))} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold">全选当前结果</button>
+                            <button type="button" onClick={() => setSelectedDeliveryItemIds(selectedDeliveryItemIds.filter(id => !modalAccountItems.some(item => item.item_id === id)))} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold">取消当前结果</button>
+                            <button type="button" onClick={() => setSelectedDeliveryItemIds([])} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold">清空</button>
+                          </div>
+                          <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-gray-200 bg-white p-2">
+                            {modalAccountItems.map(item => {
+                              const selected = selectedDeliveryItemIds.includes(item.item_id);
+                              return <label key={item.item_id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-gray-50"><input type="checkbox" checked={selected} onChange={event => setSelectedDeliveryItemIds(current => event.target.checked ? Array.from(new Set([...current, item.item_id])) : current.filter(id => id !== item.item_id))} /><span className="truncate">{item.item_title || item.item_id}</span><span className="ml-auto text-xs text-gray-400">{item.item_id}</span></label>;
+                            })}
+                            {modalAccountItems.length === 0 && <p className="py-3 text-center text-xs text-gray-400">没有匹配商品</p>}
+                          </div>
+                          <p className="mt-2 text-xs text-gray-500">全选当前结果会为这些已存在商品逐条创建/更新规则，不会自动覆盖未来新增商品。</p>
+                        </div>
+                      )}
                     </div>
 
                     {selectedRuleItem && currentTrigger !== 'review_missing_timeout' && (
@@ -1416,30 +1551,89 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                                 </div>
                               </>
                             )}
-                            <div>
-                              <label className="block text-xs font-bold text-gray-600 mb-2">卡密库存</label>
+                            <div className="md:col-span-full">
+                              <label className="block text-xs font-bold text-gray-600 mb-2">发货方式</label>
                               <select
-                                value={variant.card_id || ''}
-                                onChange={event => updateVariant(index, { card_id: Number(event.target.value) })}
+                                value={variant.delivery_mode || 'card'}
+                                onChange={event => updateDeliveryMode(index, event.target.value as 'card' | 'template')}
+                                disabled={currentTrigger !== 'order_paid' && currentTrigger !== 'buyer_reviewed'}
                                 className="w-full ios-input px-3 py-2.5 rounded-lg"
                               >
-                                <option value="">请选择卡密库存</option>
-                                {cards.filter(card => card.enabled && card.type !== 'api').map(card => (
-                                  <option key={card.id} value={card.id}>{card.name}</option>
-                                ))}
+                                <option value="card">直接发送卡密</option>
+                                {(currentTrigger === 'order_paid' || currentTrigger === 'buyer_reviewed') && <option value="template">使用发货模板</option>}
                               </select>
                             </div>
-                            <div>
-                              <label className="block text-xs font-bold text-gray-600 mb-2">每件份数</label>
-                              <input
-                                type="number"
-                                min="1"
-                                max="100"
-                                value={variant.delivery_count}
-                                onChange={event => updateVariant(index, { delivery_count: Math.max(1, Number(event.target.value) || 1) })}
-                                className="w-full ios-input px-3 py-2.5 rounded-lg"
-                              />
-                            </div>
+                            {(variant.delivery_mode || 'card') === 'template' ? (
+                              <div className="md:col-span-full rounded-xl border border-blue-100 bg-blue-50/50 p-3 space-y-3">
+                                <div>
+                                  <label className="block text-xs font-bold text-gray-600 mb-2">发货模板</label>
+                                  <select
+                                    value={variant.delivery_template_id || ''}
+                                    onChange={event => updateTemplateForVariant(index, Number(event.target.value))}
+                                    className="w-full ios-input px-3 py-2.5 rounded-lg"
+                                  >
+                                    <option value="">请选择发货模板</option>
+                                    {deliveryTemplates.filter(template => template.enabled).map(template => (
+                                      <option key={template.id} value={template.id}>{template.name}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                {variant.delivery_template_id ? (
+                                  <div className="space-y-2">
+                                    <div className="text-xs font-bold text-blue-700">模板中的卡密引用（每个引用独立绑定卡密组）</div>
+                                    {(variant.template_bindings || bindingsForTemplate(variant.delivery_template_id)).map((binding, bindingIndex) => (
+                                      <div key={binding.key} className="grid grid-cols-[minmax(80px,0.7fr)_minmax(0,1.6fr)_90px] gap-2 items-end">
+                                        <div className="rounded-lg bg-white px-3 py-2.5 text-xs font-mono font-bold text-blue-700">{'{{delivery.cards.'}{binding.key}{'}}'}</div>
+                                        <select
+                                          value={binding.card_id || ''}
+                                          onChange={event => updateVariant(index, { template_bindings: (variant.template_bindings || bindingsForTemplate(variant.delivery_template_id)).map((item, itemIndex) => itemIndex === bindingIndex ? { ...item, card_id: Number(event.target.value) } : item) })}
+                                          className="w-full ios-input px-3 py-2.5 rounded-lg"
+                                        >
+                                          <option value="">选择卡密组</option>
+                                          {cards.filter(card => card.enabled && (card.type === 'text' || card.type === 'data')).map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
+                                        </select>
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          max="100"
+                                          aria-label={`${binding.key} 每件份数`}
+                                          value={binding.delivery_count || 1}
+                                          onChange={event => updateVariant(index, { template_bindings: (variant.template_bindings || bindingsForTemplate(variant.delivery_template_id)).map((item, itemIndex) => itemIndex === bindingIndex ? { ...item, delivery_count: Math.max(1, Number(event.target.value) || 1) } : item) })}
+                                          className="w-full ios-input px-3 py-2.5 rounded-lg"
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : <p className="text-xs text-blue-700">选择模板后，这里会显示模板中的全部卡密引用。</p>}
+                              </div>
+                            ) : (
+                              <>
+                                <div>
+                                  <label className="block text-xs font-bold text-gray-600 mb-2">卡密库存</label>
+                                  <select
+                                    value={variant.card_id || ''}
+                                    onChange={event => updateVariant(index, { card_id: Number(event.target.value) })}
+                                    className="w-full ios-input px-3 py-2.5 rounded-lg"
+                                  >
+                                    <option value="">请选择卡密库存</option>
+                                    {cards.filter(card => card.enabled && card.type !== 'api').map(card => (
+                                      <option key={card.id} value={card.id}>{card.name}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-bold text-gray-600 mb-2">每件份数</label>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="100"
+                                    value={variant.delivery_count}
+                                    onChange={event => updateVariant(index, { card_id: Number(variant.card_id || 0), delivery_count: Math.max(1, Number(event.target.value) || 1) })}
+                                    className="w-full ios-input px-3 py-2.5 rounded-lg"
+                                  />
+                                </div>
+                              </>
+                            )}
                             <div className="md:col-span-full flex flex-wrap items-center gap-3 rounded-xl bg-gray-50 px-3 py-2">
                               <label className="flex items-center gap-2 text-xs font-bold text-gray-600 cursor-pointer">
                                 <input
