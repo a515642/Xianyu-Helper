@@ -94,8 +94,8 @@ func (s *Server) listOrders(w http.ResponseWriter, r *http.Request) {
 			"receiver_phone":   o.ReceiverPhone,
 			"receiver_address": o.ReceiverAddr,
 			"receiver_city":    o.ReceiverCity,
-			"created_at":       o.CreatedAt,
-			"updated_at":       o.UpdatedAt,
+			"created_at":       normalizeOrderTimestamp(o.CreatedAt, time.Local),
+			"updated_at":       normalizeOrderTimestamp(o.UpdatedAt, time.Local),
 		})
 	}
 	totalPages := (total + pageSize - 1) / pageSize
@@ -140,8 +140,8 @@ func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 		"receiver_phone":   o.ReceiverPhone,
 		"receiver_address": o.ReceiverAddr,
 		"receiver_city":    o.ReceiverCity,
-		"created_at":       o.CreatedAt,
-		"updated_at":       o.UpdatedAt,
+		"created_at":       normalizeOrderTimestamp(o.CreatedAt, time.Local),
+		"updated_at":       normalizeOrderTimestamp(o.UpdatedAt, time.Local),
 	}
 	payload["success"] = true
 	payload["data"] = map[string]any{
@@ -163,8 +163,8 @@ func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 		"receiver_phone":   o.ReceiverPhone,
 		"receiver_address": o.ReceiverAddr,
 		"receiver_city":    o.ReceiverCity,
-		"created_at":       o.CreatedAt,
-		"updated_at":       o.UpdatedAt,
+		"created_at":       normalizeOrderTimestamp(o.CreatedAt, time.Local),
+		"updated_at":       normalizeOrderTimestamp(o.UpdatedAt, time.Local),
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

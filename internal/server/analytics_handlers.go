@@ -325,7 +325,7 @@ func (s *Server) validOrders(w http.ResponseWriter, r *http.Request) {
 				"order_id": orderID, "item_id": itemID, "buyer_id": buyerID,
 				"item_title": itemTitle, "item_image": itemImageFromDetail(itemDetail),
 				"quantity": quantity, "amount": amount, "order_status": status,
-				"status": status, "cookie_id": cookieID, "created_at": createdAt,
+				"status": status, "cookie_id": cookieID, "created_at": normalizeOrderTimestamp(createdAt, time.Local),
 			})
 		}
 	}
