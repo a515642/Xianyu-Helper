@@ -1,5 +1,5 @@
 -- +goose Up
-INSERT OR IGNORE INTO system_settings (key, value, description) VALUES
+INSERT IGNORE INTO system_settings (`key`, value, description) VALUES
     ('ai_api_url', '', 'AI OpenAI兼容API地址（只填域名，系统自动补全 /v1/chat/completions）'),
     ('ai_api_key', '', 'AI API Key'),
     ('ai_model', '', 'AI模型名称（必填）');
