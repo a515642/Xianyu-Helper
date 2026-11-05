@@ -242,6 +242,12 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 				return true, nil
 			}
 			c.logger.Error("自动化规则执行失败", "rule_id", rule.ID, "trigger", task.TriggerType, "err", err)
+			if isPlatformBlockErr(err) {
+				// 风控或会话失效时同账号的其余规则不得继续请求平台，交给下一轮冷却后再试。
+				c.logger.Warn("自动化执行遇到平台阻断，停止该事件剩余规则", "account", task.AccountID,
+					"order_id", task.OrderID, "trigger", task.TriggerType, "rule_id", rule.ID)
+				return false, err
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -736,18 +742,12 @@ func (c *Center) prepareTask(ctx context.Context, task Task) (Task, error) {
 		BuyerID:  task.BuyerID,
 		ChatID:   task.ChatID,
 	})
-	needsDetail := task.TriggerType == TriggerOrderPaid
 	if existing, err := c.store.Orders.Get(ctx, task.OrderID); err == nil && existing != nil {
 		task = mergeOrderIntoTask(task, existing)
-		if needsDetail && (existing.Quantity == "" || existing.Amount == "") {
-			needsDetail = true
-		}
-		// 规则是否多规格由 action.config_json 决定；这里无法提前知道命中的 action，
-		// 因此交易类事件统一补齐规格，确保后续规格映射有事实依据。
-		if needsDetail && (existing.SpecName == "" || existing.SpecValue == "") {
-			needsDetail = true
-		}
 	}
+	// 付款发货所需的本地事实齐全时不再请求平台订单详情，减少付款事件和续跑对平台的请求；
+	// 缺少数量、金额或规格时必须补齐，不能按部分事实猜测发货。
+	needsDetail := task.TriggerType == TriggerOrderPaid && !paidOrderFactsComplete(task)
 	if !needsDetail || c.fetcher == nil {
 		return task, nil
 	}
@@ -793,6 +793,13 @@ func (c *Center) prepareTask(ctx context.Context, task Task) (Task, error) {
 		OrderStatus: task.OrderStatus,
 	})
 	return task, nil
+}
+
+// paidOrderFactsComplete 判断付款发货所需的本地订单事实是否齐全：可靠的正整数数量、
+// 金额和完整规格组合（规格名与规格值）。任一缺失都必须向平台补齐。
+func paidOrderFactsComplete(task Task) bool {
+	return parsePositiveInt(task.Quantity) > 0 && strings.TrimSpace(task.Amount) != "" &&
+		strings.TrimSpace(task.SpecName) != "" && strings.TrimSpace(task.SpecValue) != ""
 }
 
 func mergeOrderIntoTask(task Task, order *db.Order) Task {
