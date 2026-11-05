@@ -9,6 +9,8 @@ import {
   getAccountDetails,
   getAIProfiles,
 	getCards,
+	getCardSales,
+	exportCardSales,
 	getAutomationIssues,
 	getAutomationAuditEvents,
   getItems,
@@ -819,4 +821,34 @@ test('updateShippingRule posts review request text action without card requireme
       message_template: '亲，方便的话麻烦给个评价～',
     }),
   ]);
+});
+
+test('getCardSales trims search and builds the ledger query', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+    records: [{ id: 1, card_id: 3, content: 'K1', status: 'sold' }],
+    total: 1, page: 2, page_size: 20, total_pages: 1,
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  const page = await getCardSales({ card_id: 3, status: 'sold', search: ' K1 ', page: 2 });
+  expect(fetchMock.mock.calls[0][0]).toBe('/card-sales?card_id=3&status=sold&search=K1&page=2&page_size=20');
+  expect(page.records[0]).toMatchObject({ content: 'K1', status: 'sold' });
+});
+
+test('exportCardSales streams the CSV for the current status filter', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response('卡密内容\r\nK1\r\n', {
+    status: 200,
+    headers: { 'content-type': 'text/csv; charset=utf-8' },
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  const blob = await exportCardSales(3, 'reserved');
+  expect(fetchMock).toHaveBeenCalledWith('/cards/3/sales/export?status=reserved', { credentials: 'include' });
+  expect(await blob.text()).toContain('K1');
+});
+
+test('exportCardSales surfaces the backend error detail', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: '卡种不存在' }), {
+    status: 404,
+    headers: { 'content-type': 'application/json' },
+  })));
+  await expect(exportCardSales(9)).rejects.toThrow('卡种不存在');
 });

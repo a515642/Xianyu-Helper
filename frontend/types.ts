@@ -256,6 +256,34 @@ export interface CardItemPage {
   total_pages: number;
 }
 
+// 卡密售出台账：预留时 reserved，确认发送后 sold；卡种删除后仍保留。
+export type CardSaleStatus = 'reserved' | 'sold';
+
+export interface CardSaleRecord {
+  id: number;
+  card_id: number;
+  card_item_id: number;
+  card_name: string;
+  card_kind: string;
+  content: string;
+  status: CardSaleStatus;
+  run_id: number;
+  cookie_id: string;
+  order_id: string;
+  item_id: string;
+  buyer_id: string;
+  created_at: number;
+  sold_at: number;
+}
+
+export interface CardSalePage {
+  records: CardSaleRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 // Items
 export interface Item {
   id: string | number;

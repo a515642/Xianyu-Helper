@@ -62,6 +62,12 @@ func (s *Server) resolveAutomationRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 用户确认“已执行”后，本次运行遗留的待核对卡密台账才算真正售出。
+	if strings.TrimSpace(req.Resolution) == "continue" {
+		if _, err := s.Store.Cards.SettleRunSales(r.Context(), sess.UserID, runID); err != nil {
+			s.Logger.Warn("结算自动化运行卡密台账失败", "run_id", runID, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 

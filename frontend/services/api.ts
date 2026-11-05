@@ -1,7 +1,7 @@
 import { get, post, put, del, postForm, type RequestControlOptions } from '../request';
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
-  AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, SystemSettings, ApiResponse, OrderAnalytics,
+  AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, CardSalePage, CardSaleStatus, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, ItemGreetingRule, ItemGreetingRuleInput, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
@@ -587,6 +587,44 @@ export const exportCardItems = async (
       order_id: payload.order_id?.trim() || undefined,
     }),
   });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let detail = text;
+    try { detail = JSON.parse(text)?.detail || text; } catch { /* 非 JSON 时直接用原文 */ }
+    throw new Error(detail || '导出失败');
+  }
+  return res.blob();
+};
+
+// 卡密售出台账（预留/已售），卡种删除后仍可查询。
+export const getCardSales = async (query: {
+  card_id?: number;
+  status?: CardSaleStatus | '';
+  search?: string;
+  cookie_id?: string;
+  order_id?: string;
+  page?: number;
+  page_size?: number;
+} = {}): Promise<CardSalePage> => {
+  return get<CardSalePage>('/card-sales', {
+    card_id: query.card_id || undefined,
+    status: query.status || undefined,
+    search: query.search?.trim() || undefined,
+    cookie_id: query.cookie_id?.trim() || undefined,
+    order_id: query.order_id?.trim() || undefined,
+    page: query.page ?? 1,
+    page_size: query.page_size ?? 20,
+  });
+};
+
+export const exportCardSales = async (
+  cardId: string | number,
+  status?: CardSaleStatus | '',
+): Promise<Blob> => {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  const suffix = params.toString() ? `?${params}` : '';
+  const res = await fetch(`/cards/${cardId}/sales/export${suffix}`, { credentials: 'include' });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let detail = text;

@@ -1213,6 +1213,11 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 		}
 		sent++
 	}
+	for _, entry := range reserved {
+		if markErr := c.store.Cards.MarkDataItemSold(ctx, entry.itemID); markErr != nil {
+			c.logger.Warn("标记卡密售出台账失败", "card_item_id", entry.itemID, "err", markErr)
+		}
+	}
 	return sent, nil
 }
 
@@ -1241,8 +1246,11 @@ func (c *Center) sendDataCard(ctx context.Context, task Task, card *db.CardFull,
 					}
 					return sent, err
 				}
-				// 请求已经交给传输层后无法判断远端是否收到，保留已用状态并人工核对。
+				// 请求已经交给传输层后无法判断远端是否收到，保留待核对台账并人工核对。
 				return sent, uncertainAction(err)
+			}
+			if markErr := c.store.Cards.MarkDataItemSold(ctx, itemID); markErr != nil {
+				c.logger.Warn("标记卡密售出台账失败", "card_item_id", itemID, "err", markErr)
 			}
 		}
 		sent++
@@ -1262,9 +1270,12 @@ func (c *Center) cardItemMeta(task Task) db.CardItemMeta {
 		BuyerID:   task.BuyerID,
 		BuyerName: buyerName,
 		OrderID:   task.OrderID,
+		ItemID:    task.ItemID,
 		SpecName:  task.SpecName,
 		SpecValue: task.SpecValue,
 		Quantity:  maxDeliveryQuantity(task.Quantity),
+		RunID:     taskAutomationRunID(task),
+		CookieID:  task.AccountID,
 	}
 }
 

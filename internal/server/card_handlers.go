@@ -20,6 +20,9 @@ func (s *Server) mountCardsReal(r chi.Router) {
 	r.Post("/cards/{card_id}/items", s.addCardItems)
 	r.Get("/cards/{card_id}/details", s.getCard)
 	r.Get("/cards/{card_id}/stock", s.cardStock)
+	// 售出台账（卡种删除后仍保留）。
+	r.Get("/card-sales", s.listCardSales)
+	r.Get("/cards/{card_id}/sales/export", s.exportCardSales)
 	// 卡密条目（逐条状态管理）。静态段需先于 {card_id} 注册，避免被当作组 ID。
 	r.Get("/cards/items", s.listCardItems)
 	r.Post("/cards/{card_id}/items/export", s.exportCardItems)
