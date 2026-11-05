@@ -705,6 +705,21 @@ func (i *Items) SyncFromRemote(ctx context.Context, cookieID string, rows []Item
 	if _, err := tx.ExecContext(ctx, ruleQuery, ruleArgs...); err != nil {
 		return rollback(err)
 	}
+	// 商品在远端被下架/删除后，同步清理 AI 助手绑定，避免残留幽灵商品。
+	bindArgs := make([]any, 0, len(remoteIDs)+1)
+	bindArgs = append(bindArgs, cookieID)
+	bindQuery := `DELETE FROM ai_profile_items WHERE cookie_id=?`
+	if len(remoteIDs) > 0 {
+		placeholders := make([]string, 0, len(remoteIDs))
+		for itemID := range remoteIDs {
+			placeholders = append(placeholders, "?")
+			bindArgs = append(bindArgs, itemID)
+		}
+		bindQuery += ` AND item_id NOT IN (` + strings.Join(placeholders, ",") + ")"
+	}
+	if _, err := tx.ExecContext(ctx, bindQuery, bindArgs...); err != nil {
+		return rollback(err)
+	}
 	if err := tx.Commit(); err != nil {
 		return ItemSyncResult{}, err
 	}
@@ -744,7 +759,7 @@ func (i *Items) upsertBasic(ctx context.Context, execer sqlExecer, r *ItemInfoRo
 	return err
 }
 
-// Delete 逻辑删除商品及其商品级自动化规则，保留历史数据以便审计和恢复。
+// Delete 逻辑删除商品及其商品级自动化规则，并解除 AI 助手绑定，避免残留幽灵商品。
 func (i *Items) Delete(ctx context.Context, cookieID, itemID string) error {
 	tx, err := i.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -759,6 +774,10 @@ func (i *Items) Delete(ctx context.Context, cookieID, itemID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE automation_rules
 		SET deleted_at=CURRENT_TIMESTAMP, enabled=0, updated_at=CURRENT_TIMESTAMP
 		WHERE cookie_id=? AND item_id=? AND deleted_at IS NULL`, cookieID, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_profile_items
+		WHERE cookie_id=? AND item_id=?`, cookieID, itemID); err != nil {
 		return err
 	}
 	return tx.Commit()

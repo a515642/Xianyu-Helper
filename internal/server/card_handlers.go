@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -114,6 +115,10 @@ func (s *Server) deleteCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.Cards.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, db.ErrCardInUse) {
+			writeErr(w, http.StatusConflict, "该卡种仍被发货规则或发货模板引用，请先解除绑定后再删除")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "删除失败")
 		return
 	}

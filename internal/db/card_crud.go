@@ -163,8 +163,44 @@ func (c *Cards) Update(ctx context.Context, cf *CardFull) error {
 	return err
 }
 
+// ErrCardInUse 卡种仍被启用的发货规则或发货模板引用，需先解除绑定。
+var ErrCardInUse = errors.New("卡种仍被发货规则或发货模板引用")
+
 // Delete 删除卡种；其卡密条目由外键 ON DELETE CASCADE 一并删除。
+// 已启用规则或模板仍在引用时拒绝删除，已删除规则遗留的引用则自动解除，
+// 避免历史配置阻塞卡种清理。
 func (c *Cards) Delete(ctx context.Context, cardID int64) error {
-	_, err := c.DB.ExecContext(ctx, `DELETE FROM cards WHERE id=?`, cardID)
-	return err
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var activeRefs int
+	if err := tx.QueryRowContext(ctx, `
+SELECT
+  (SELECT COUNT(*) FROM automation_rule_actions a
+     JOIN automation_rules r ON r.id=a.rule_id
+    WHERE a.card_id=? AND r.deleted_at IS NULL)
++ (SELECT COUNT(*) FROM automation_action_template_bindings b
+     JOIN automation_rule_actions a ON a.id=b.action_id
+     JOIN automation_rules r ON r.id=a.rule_id
+    WHERE b.card_id=? AND r.deleted_at IS NULL)`, cardID, cardID).Scan(&activeRefs); err != nil {
+		return err
+	}
+	if activeRefs > 0 {
+		return ErrCardInUse
+	}
+
+	// 已删除规则保留动作只用于审计；解除其中的卡种引用后再删除卡种。
+	if _, err := tx.ExecContext(ctx, `UPDATE automation_rule_actions SET card_id=NULL WHERE card_id=?`, cardID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM automation_action_template_bindings WHERE card_id=?`, cardID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cards WHERE id=?`, cardID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
