@@ -90,4 +90,3 @@ func TestCardSaleListAndExport(t *testing.T) {
 		t.Fatalf("export body=%s", body)
 	}
 }
-

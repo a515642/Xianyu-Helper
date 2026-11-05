@@ -76,8 +76,8 @@ func (c *ClientImpl) adjustPriceRequest(ctx context.Context, cookiesStr, endpoin
 		return nil, err
 	}
 	var decoded struct {
-		Ret  []string         `json:"ret"`
-		Data map[string]any   `json:"data"`
+		Ret  []string       `json:"ret"`
+		Data map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, fmt.Errorf("解析订单改价响应失败: %w", err)
