@@ -182,6 +182,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		if err := c.deferTask(ctx, task, until); err != nil {
 			return false, err
 		}
+		c.audit().queued(ctx, task, 0, 0, "账号已暂停，等待恢复后执行")
 		c.logger.Info("账号已暂停，自动化事件已持久化等待恢复", "account", task.AccountID, "trigger", task.TriggerType, "due_at", until)
 		return true, nil
 	}
@@ -190,6 +191,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		return false, err
 	}
 	if !enabled {
+		c.audit().skipped(ctx, task, "账号已停用")
 		c.logger.Info("账号已停用，记录事件事实但不执行自动化", "account", task.AccountID, "trigger", task.TriggerType)
 		return false, nil
 	}
@@ -222,6 +224,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		}
 	}
 	if len(rules) == 0 {
+		c.audit().skipped(ctx, task, "没有匹配的自动化规则")
 		c.logger.Info("无匹配自动化规则，忽略事件", "trigger", task.TriggerType, "order_id", task.OrderID, "item_id", task.ItemID)
 		return false, nil
 	}
@@ -234,6 +237,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 				if deferErr := c.deferTaskWithError(ctx, task, dueAt, prepErr.Error()); deferErr != nil {
 					return false, errors.Join(err, fmt.Errorf("持久化前置失败任务: %w", deferErr))
 				}
+				c.audit().queued(ctx, task, 0, rule.ID, "前置处理失败，等待自动重试")
 				c.logger.Warn("自动化前置处理失败，任务已持久化等待恢复", "account", task.AccountID,
 					"order_id", task.OrderID, "trigger", task.TriggerType, "retry_at", dueAt, "err", err)
 				return true, nil
@@ -465,6 +469,7 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 	retryTask.CookieStr = ""
 	rawJSON, _ := json.Marshal(retryTask)
 	var run *db.AutomationRun
+	createdRun := false
 	if resumeID := taskAutomationRunID(task); resumeID > 0 {
 		run, err = c.store.Automation.GetRun(ctx, resumeID)
 		if err != nil {
@@ -489,6 +494,10 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 		if err != nil {
 			return err
 		}
+		createdRun = true
+	}
+	if createdRun {
+		c.audit().runStarted(ctx, task, rule.ID, run.ID)
 	}
 	status := "success"
 	errMsg := ""
@@ -503,6 +512,7 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 			c.logger.Error("保存自动化执行结果失败", "run_id", run.ID, "err", finishErr)
 		}
 		cancel()
+		c.audit().runFinished(ctx, task, rule.ID, run.ID, status, sent, errMsg)
 		if c.notifier != nil {
 			c.notifyResult(task, status, sent, errMsg)
 		}
@@ -609,6 +619,7 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				if err := c.deferTask(ctx, task, dueAt.Unix()); err != nil {
 					return sent, false, err
 				}
+				c.audit().queued(ctx, task, run.ID, ruleID, fmt.Sprintf("动作延迟 %d 秒后执行", delaySeconds))
 				return sent, true, nil
 			}
 		}
@@ -628,6 +639,7 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 					c.logger.Error("保存不确定动作人工核对状态失败", "run_id", run.ID, "err", quarantineErr)
 					return sent + n, false, errors.Join(errAutomationNeedsReview, errAutomationQuarantine, actionErr, quarantineErr)
 				}
+				c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, actionErr.Error())
 				return sent + n, false, fmt.Errorf("%w: %v", errAutomationNeedsReview, actionErr)
 			}
 			if abortErr := c.store.Automation.AbortRunAction(ctx, run.ID, run.AttemptCount, cursor); abortErr != nil {
@@ -635,8 +647,10 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				if quarantineErr := c.store.Automation.QuarantineRun(ctx, run.ID, run.AttemptCount, reason); quarantineErr != nil {
 					c.logger.Error("隔离动作状态异常的自动化运行失败", "run_id", run.ID, "err", quarantineErr)
 				}
+				c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, reason)
 				return sent, false, fmt.Errorf("%w: %s", errAutomationNeedsReview, reason)
 			}
+			c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusFailed, actionErr.Error())
 			return sent, false, actionErr
 		}
 		if err := c.store.Automation.AdvanceRunAction(ctx, run.ID, run.AttemptCount, cursor, n); err != nil {
@@ -644,8 +658,10 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				c.logger.Error("保存检查点异常的人工核对状态失败", "run_id", run.ID, "err", quarantineErr)
 				return sent + n, false, errors.Join(errAutomationNeedsReview, errAutomationQuarantine, err, quarantineErr)
 			}
+			c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, "动作已执行但检查点保存失败")
 			return sent + n, false, fmt.Errorf("%w: %v", errAutomationNeedsReview, err)
 		}
+		c.audit().actionSucceeded(ctx, task, ruleID, run.ID, action, n)
 		sent += n
 		if task.Raw != nil {
 			delete(task.Raw, "automation_delay_cursor")
@@ -864,6 +880,7 @@ func (c *Center) paidAmountBlockedReason(raw string) string {
 func (c *Center) skipPaidRunForBlockedAmount(ctx context.Context, task Task, reason string) error {
 	resumeID := taskAutomationRunID(task)
 	if resumeID <= 0 {
+		c.audit().skipped(ctx, task, "订单金额不是正数："+reason)
 		c.logger.Info("订单金额不是正数，跳过付款自动发货", "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
 		return nil
 	}
@@ -882,6 +899,7 @@ func (c *Center) skipPaidRunForBlockedAmount(ctx context.Context, task Task, rea
 		if err := c.store.Automation.FinishRun(ctx, run.ID, run.AttemptCount, "canceled", 0, cancelReason); err != nil {
 			return fmt.Errorf("取消零金额付款运行: %w", err)
 		}
+		c.audit().runFinished(ctx, task, run.RuleID, run.ID, db.AuditStatusCanceled, 0, cancelReason)
 		c.logger.Info("订单金额不是正数，取消尚未执行动作的付款运行", "run_id", run.ID, "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
 		return nil
 	}
@@ -889,6 +907,7 @@ func (c *Center) skipPaidRunForBlockedAmount(ctx context.Context, task Task, rea
 	if err := c.store.Automation.QuarantineRunResult(ctx, run.ID, run.AttemptCount, run.SentCount, reasonText); err != nil {
 		return fmt.Errorf("保存零金额付款运行人工核对状态: %w", err)
 	}
+	c.audit().runFinished(ctx, task, run.RuleID, run.ID, db.AuditStatusNeedsReview, run.SentCount, reasonText)
 	c.notifyRunNeedsReview(*run, reasonText)
 	return nil
 }

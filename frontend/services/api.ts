@@ -999,6 +999,66 @@ export const resolveAutomationRun = async (id: number, resolution: 'continue' | 
 export const resolveDeferredAutomationTask = async (id: number, resolution: 'retry' | 'dismiss'): Promise<any> =>
   post(`/automation-pending-tasks/${id}/resolve`, { resolution });
 
+// 自动化规则日志
+export type AutomationAuditEventType =
+  | 'skipped'
+  | 'queued'
+  | 'run_started'
+  | 'action_succeeded'
+  | 'action_failed'
+  | 'run_finished';
+export type AutomationAuditStatus =
+  | 'skipped'
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'needs_review'
+  | 'canceled';
+
+export interface AutomationAuditEvent {
+  id: number;
+  cookie_id: string;
+  order_id: string;
+  item_id: string;
+  rule_id: number;
+  run_id: number;
+  trigger_type: string;
+  source: string;
+  event_type: AutomationAuditEventType;
+  status: AutomationAuditStatus;
+  action_type: string;
+  summary: string;
+  reason: string;
+  created_at: number;
+}
+
+export interface AutomationAuditQuery {
+  cookie_id?: string;
+  order_id?: string;
+  run_id?: number;
+  trigger_type?: string;
+  event_type?: AutomationAuditEventType;
+  status?: AutomationAuditStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export const getAutomationAuditEvents = async (query: AutomationAuditQuery = {}): Promise<{
+  items: AutomationAuditEvent[];
+  total: number;
+}> => {
+  const params: Record<string, string | number> = {};
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== '' && value !== null) params[key] = value;
+  });
+  const result = await get<any>('/automation-audit-events', params);
+  return {
+    items: Array.isArray(result?.items) ? result.items : [],
+    total: Number(result?.total || 0),
+  };
+};
+
 // Rules - 关键词回复规则 (使用关键词API)
 type KeywordRowPayload = {
     id: string;

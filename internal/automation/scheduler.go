@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xianyu-go/internal/db"
@@ -28,6 +29,8 @@ type Scheduler struct {
 	interval time.Duration
 	runOnce  sync.Once
 	done     chan struct{}
+	// auditPrunedAt 是上次审计清理的 Unix 秒，零值表示尚未清理过。
+	auditPrunedAt atomic.Int64
 }
 
 // NewScheduler 构造计划任务调度器。
@@ -66,6 +69,7 @@ func (s *Scheduler) Wait() {
 }
 
 func (s *Scheduler) scan(ctx context.Context) {
+	s.pruneAuditEvents(ctx)
 	s.runDeferredTasks(ctx)
 	s.center.scanAccountTasks(ctx)
 	if recovered, err := s.center.store.Automation.RecoverDefinitelyUnsentReviewRuns(ctx); err != nil {

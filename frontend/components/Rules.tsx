@@ -42,7 +42,12 @@ import {
   resolveDeferredAutomationTask,
   AutomationRunIssue,
   DeferredAutomationIssue,
+  AutomationAuditEvent,
+  AutomationAuditEventType,
+  AutomationAuditStatus,
+  getAutomationAuditEvents,
 } from '../services/api';
+import { formatLocalDateTime } from '../dateTime';
 import {
   AlertCircle,
   Bot,
@@ -58,6 +63,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  ScrollText,
   Search,
   Send,
   SlidersHorizontal,
@@ -72,7 +78,36 @@ import {
 } from './automationIssueState';
 import { commitIfLatest } from './latestRequest';
 
-type RulesTab = 'automation' | 'reply' | 'default' | 'greetings';
+type RulesTab = 'automation' | 'reply' | 'default' | 'greetings' | 'audit';
+
+const auditEventLabels: Record<AutomationAuditEventType, string> = {
+  skipped: '已跳过',
+  queued: '已排队',
+  run_started: '开始执行',
+  action_succeeded: '动作成功',
+  action_failed: '动作失败',
+  run_finished: '运行结束',
+};
+
+const auditStatusLabels: Record<AutomationAuditStatus, string> = {
+  skipped: '已跳过',
+  queued: '排队中',
+  running: '执行中',
+  success: '成功',
+  failed: '失败',
+  needs_review: '需人工核对',
+  canceled: '已取消',
+};
+
+const auditStatusClasses: Record<AutomationAuditStatus, string> = {
+  skipped: 'bg-gray-100 text-gray-600',
+  queued: 'bg-amber-50 text-amber-700',
+  running: 'bg-blue-50 text-blue-700',
+  success: 'bg-emerald-50 text-emerald-700',
+  failed: 'bg-red-50 text-red-700',
+  needs_review: 'bg-orange-50 text-orange-700',
+  canceled: 'bg-gray-100 text-gray-500',
+};
 type DeliveryScope = 'account' | 'items';
 
 interface RulesProps {
@@ -259,6 +294,10 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const [replyRules, setReplyRules] = useState<ReplyRule[]>([]);
   const [defaultReplies, setDefaultReplies] = useState<Record<string, DefaultReply>>({});
   const [greetingRules, setGreetingRules] = useState<ItemGreetingRule[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AutomationAuditEvent[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditStatusFilter, setAuditStatusFilter] = useState<AutomationAuditStatus | ''>('');
+  const [auditEventFilter, setAuditEventFilter] = useState<AutomationAuditEventType | ''>('');
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [deliveryTemplates, setDeliveryTemplates] = useState<DeliveryTemplate[]>([]);
@@ -359,6 +398,17 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     setGreetingRules(await getItemGreetingRules(selectedAccountId || undefined));
   }, [selectedAccountId]);
 
+  const loadAuditEvents = useCallback(async () => {
+    const result = await getAutomationAuditEvents({
+      cookie_id: selectedAccountId || undefined,
+      status: auditStatusFilter || undefined,
+      event_type: auditEventFilter || undefined,
+      limit: 100,
+    });
+    setAuditEvents(result.items);
+    setAuditTotal(result.total);
+  }, [selectedAccountId, auditStatusFilter, auditEventFilter]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -368,13 +418,20 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
         await loadReplyRules();
       } else if (activeTab === 'greetings') {
         await loadGreetingRules();
+      } else if (activeTab === 'audit') {
+        await loadAuditEvents();
       } else {
         await loadDefaultReplies();
       }
     } finally {
       setLoading(false);
     }
-  }, [activeTab, loadAutomationRules, loadDefaultReplies, loadGreetingRules, loadReplyRules]);
+  }, [activeTab, loadAuditEvents, loadAutomationRules, loadDefaultReplies, loadGreetingRules, loadReplyRules]);
+
+  useEffect(() => {
+    if (activeTab !== 'audit') return;
+    void loadAuditEvents().catch(error => console.error('加载自动化规则日志失败', error));
+  }, [activeTab, loadAuditEvents]);
 
   useEffect(() => {
 	const timer = window.setTimeout(() => {
@@ -1056,14 +1113,16 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             刷新
           </button>
-          <button
-            onClick={activeTab === 'automation' ? () => openNewAutomationRule('order_paid') : activeTab === 'reply' ? handleAddReplyRule : activeTab === 'greetings' ? () => openGreetingModal() : () => void openDefaultReplyModal()}
-            disabled={!selectedAccountId}
-            className="ios-btn-primary px-5 py-3 rounded-2xl text-sm font-extrabold flex items-center justify-center gap-2 whitespace-nowrap disabled:opacity-50"
-          >
-            <Plus className="w-4 h-4" />
-            {primaryActionLabel}
-          </button>
+          {activeTab !== 'audit' && (
+            <button
+              onClick={activeTab === 'automation' ? () => openNewAutomationRule('order_paid') : activeTab === 'reply' ? handleAddReplyRule : activeTab === 'greetings' ? () => openGreetingModal() : () => void openDefaultReplyModal()}
+              disabled={!selectedAccountId}
+              className="ios-btn-primary px-5 py-3 rounded-2xl text-sm font-extrabold flex items-center justify-center gap-2 whitespace-nowrap disabled:opacity-50"
+            >
+              <Plus className="w-4 h-4" />
+              {primaryActionLabel}
+            </button>
+          )}
         </div>
       </div>
 
@@ -1073,6 +1132,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
           { id: 'reply' as const, label: '关键词回复', icon: MessageCircle },
           { id: 'default' as const, label: '账号默认回复', icon: Bot },
           { id: 'greetings' as const, label: '商品首次回复', icon: Gift },
+          { id: 'audit' as const, label: '规则日志', icon: ScrollText },
         ].map(tab => {
           const Icon = tab.icon;
           return (
@@ -1534,6 +1594,72 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
               );
             })}
             {visibleGreetingRules.length === 0 && <div className="text-center py-20 text-gray-400">暂无商品首次回复规则</div>}
+          </div>
+        </section>
+      )}
+
+      {activeTab === 'audit' && (
+        <section className="bg-white rounded-xl border border-gray-100 p-6 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+            <div className="flex items-center gap-2 text-sm text-slate-700 bg-slate-100 px-4 py-2 rounded-xl">
+              <ScrollText className="w-4 h-4" />
+              记录自动化规则的触发、跳过、执行与结果；不保存卡片或消息正文。
+            </div>
+            <div className="text-xs font-bold text-gray-500">共 {auditTotal} 条 · 最多展示最近 100 条</div>
+          </div>
+          <div className="flex flex-wrap gap-3 mb-5">
+            <select
+              value={auditStatusFilter}
+              onChange={event => setAuditStatusFilter(event.target.value as AutomationAuditStatus | '')}
+              className="ios-input px-4 py-2.5 rounded-xl text-sm"
+            >
+              <option value="">全部状态</option>
+              {(Object.keys(auditStatusLabels) as AutomationAuditStatus[]).map(status => (
+                <option key={status} value={status}>{auditStatusLabels[status]}</option>
+              ))}
+            </select>
+            <select
+              value={auditEventFilter}
+              onChange={event => setAuditEventFilter(event.target.value as AutomationAuditEventType | '')}
+              className="ios-input px-4 py-2.5 rounded-xl text-sm"
+            >
+              <option value="">全部事件</option>
+              {(Object.keys(auditEventLabels) as AutomationAuditEventType[]).map(type => (
+                <option key={type} value={type}>{auditEventLabels[type]}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-3">
+            {auditEvents.map(event => {
+              const account = accounts.find(item => item.id === event.cookie_id);
+              return (
+                <div key={event.id} className="rounded-2xl border border-gray-100 bg-surface-subtle p-4 hover:bg-white hover:shadow-md transition-all">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${auditStatusClasses[event.status] || 'bg-gray-100 text-gray-600'}`}>
+                      {auditStatusLabels[event.status] || event.status}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-900 text-white">
+                      {auditEventLabels[event.event_type] || event.event_type}
+                    </span>
+                    {event.action_type && (
+                      <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-gray-100 text-gray-600">{event.action_type}</span>
+                    )}
+                    <span className="text-xs text-gray-500">{formatLocalDateTime(event.created_at * 1000)}</span>
+                  </div>
+                  <div className="mt-2 text-sm text-gray-800 break-words">{event.summary || '—'}</div>
+                  {event.reason && <div className="mt-1 text-xs text-gray-500 break-words">原因：{event.reason}</div>}
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                    <span>{account ? accountLabel(account) : event.cookie_id || '未知账号'}</span>
+                    {event.order_id && <span>订单 {event.order_id}</span>}
+                    {event.item_id && <span>商品 {event.item_id}</span>}
+                    {event.run_id > 0 && <span>运行 #{event.run_id}</span>}
+                    {event.rule_id > 0 && <span>规则 #{event.rule_id}</span>}
+                    {event.trigger_type && <span>触发 {event.trigger_type}</span>}
+                  </div>
+                </div>
+              );
+            })}
+            {auditEvents.length === 0 && <div className="text-center py-20 text-gray-400">暂无规则日志</div>}
           </div>
         </section>
       )}

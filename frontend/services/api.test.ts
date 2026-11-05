@@ -10,6 +10,7 @@ import {
   getAIProfiles,
 	getCards,
 	getAutomationIssues,
+	getAutomationAuditEvents,
   getItems,
 	getItemPublishBatches,
 	getNotificationChannels,
@@ -131,6 +132,17 @@ test('automation issue APIs expose and resolve quarantined work', async () => {
 	expect(fetchMock.mock.calls[1][0]).toBe('/automation-runs/1/resolve');
 	expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ resolution: 'continue' });
 	expect(fetchMock.mock.calls[2][0]).toBe('/automation-pending-tasks/2/resolve');
+});
+
+test('automation audit events drop empty filters and normalize the response', async () => {
+	const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+		items: [{ id: 1, event_type: 'action_failed', status: 'failed' }],
+		total: 7,
+	}));
+	vi.stubGlobal('fetch', fetchMock);
+	const result = await getAutomationAuditEvents({ cookie_id: '', status: 'failed', event_type: 'action_failed', limit: 100 });
+	expect(fetchMock.mock.calls[0][0]).toBe('/automation-audit-events?status=failed&event_type=action_failed&limit=100');
+	expect(result).toEqual({ items: [{ id: 1, event_type: 'action_failed', status: 'failed' }], total: 7 });
 });
 
 test('order multipart requests use the shared authenticated form request path', async () => {
