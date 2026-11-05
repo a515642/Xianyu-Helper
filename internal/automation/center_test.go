@@ -152,24 +152,28 @@ func TestAbortRunActionFailureQuarantinesRun(t *testing.T) {
 
 func TestCardDefinitelyNotSentIsRetriedAndDataInventoryRestored(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		cardType   string
-		cardColumn string
+		name     string
+		cardType string
 	}{
-		{name: "text", cardType: "text", cardColumn: "text_content"},
-		{name: "data", cardType: "data", cardColumn: "data_content"},
+		{name: "text", cardType: "text"},
+		{name: "data", cardType: "data"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, cleanup := newAutomationTestStore(t)
 			defer cleanup()
 			ctx := context.Background()
 			admin, _ := store.Users.GetByUsername(ctx, "admin")
-			query := fmt.Sprintf(`INSERT INTO cards (name,type,%s,enabled,user_id) VALUES (?,?,?,?,?)`, tc.cardColumn)
-			res, err := store.DB.ExecContext(ctx, query, "gift", tc.cardType, "GIFT-CODE", 1, admin.ID)
+			kind := db.CardKindCard
+			if tc.cardType == "text" {
+				kind = db.CardKindText
+			}
+			cardID, err := store.Cards.Create(ctx, &db.CardFull{Name: "gift", Kind: kind, Enabled: true, UserID: admin.ID})
 			if err != nil {
 				t.Fatal(err)
 			}
-			cardID, _ := res.LastInsertId()
+			if _, err := store.Cards.AddItems(ctx, cardID, "GIFT-CODE"); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 				UserID: admin.ID, CookieID: "cid", ItemID: "item-card", Name: "card-retry-" + tc.name,
 				TriggerType: TriggerBuyerReviewed, Enabled: true,
@@ -192,9 +196,13 @@ func TestCardDefinitelyNotSentIsRetriedAndDataInventoryRestored(t *testing.T) {
 				t.Fatalf("确定未发送的卡密应进入可重试 failed，got %q", status)
 			}
 			if tc.cardType == "data" {
-				var inventory string
-				if err := store.DB.QueryRowContext(ctx, `SELECT data_content FROM cards WHERE id=?`, cardID).Scan(&inventory); err != nil || inventory != "GIFT-CODE" {
-					t.Fatalf("未发送 Data 卡密必须恢复库存: inventory=%q err=%v", inventory, err)
+				stock, err := store.Cards.Stock(ctx, admin.ID, cardID)
+				if err != nil || stock.Available != 1 {
+					t.Fatalf("未发送 Data 卡密必须恢复可用库存: stock=%+v err=%v", stock, err)
+				}
+				items, _, err := store.Cards.ListItems(ctx, db.CardItemFilter{UserID: admin.ID, CardID: cardID})
+				if err != nil || len(items) != 1 || items[0].Status != db.CardItemAvailable || items[0].OrderID != "" || items[0].BuyerID != "" {
+					t.Fatalf("未发送卡密必须归还归属: items=%+v err=%v", items, err)
 				}
 			}
 			sender.err = nil
@@ -205,10 +213,15 @@ func TestCardDefinitelyNotSentIsRetriedAndDataInventoryRestored(t *testing.T) {
 			if len(sender.texts) != 1 || sender.texts[0] != "GIFT-CODE" {
 				t.Fatalf("连接恢复后应发送一次卡密，got %v", sender.texts)
 			}
+			if tc.cardType == "data" {
+				stock, _ := store.Cards.Stock(ctx, admin.ID, cardID)
+				if stock.Available != 0 || stock.Used != 1 {
+					t.Fatalf("重试成功后卡密应为已用: stock=%+v", stock)
+				}
+			}
 		})
 	}
 }
-
 func TestRuleMatchingUsesStoredOrderItemWhenEventOmitsItemID(t *testing.T) {
 	store, cleanup := newAutomationTestStore(t)
 	defer cleanup()
@@ -303,7 +316,8 @@ func TestOrderPaidPreparationFailureIsPersistedAndRecovered(t *testing.T) {
 	ctx := context.Background()
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','pending-item','商品',1)`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES (91,'库存','text','RECOVERED-CARD',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (91,'库存',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (91,?,'RECOVERED-CARD','available')`, admin.ID)
 	if _, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "pending-item", Name: "付款恢复", TriggerType: TriggerOrderPaid, Enabled: true,
 		Actions: []db.AutomationActionInput{{ActionType: ActionSendCard, CardID: 91, DeliveryCount: 1, ConfigJSON: `{"spec_name":"套餐","spec_value":"恢复版"}`, Enabled: true}},
@@ -360,7 +374,7 @@ func TestActionDelayUsesCardDefaultUnlessOverridden(t *testing.T) {
 	ctx := context.Background()
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 	cardID, err := store.Cards.Create(ctx, &db.CardFull{
-		Name: "delayed", Type: "text", TextContent: "x", Enabled: true, DelaySeconds: 15, UserID: admin.ID,
+		Name: "delayed", Enabled: true, DelaySeconds: 15, UserID: admin.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -381,12 +395,12 @@ func TestActionDelayUsesCardDefaultUnlessOverridden(t *testing.T) {
 	}
 }
 
-func TestActionDelayRejectsDisabledCardAndEmptyTextCard(t *testing.T) {
+func TestActionDelayRejectsDisabledCardAndEmptyCard(t *testing.T) {
 	store, cleanup := newAutomationTestStore(t)
 	defer cleanup()
 	ctx := context.Background()
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
-	disabledID, err := store.Cards.Create(ctx, &db.CardFull{Name: "disabled", Type: "text", TextContent: "x", Enabled: false, UserID: admin.ID})
+	disabledID, err := store.Cards.Create(ctx, &db.CardFull{Name: "disabled", Enabled: false, UserID: admin.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,8 +408,14 @@ func TestActionDelayRejectsDisabledCardAndEmptyTextCard(t *testing.T) {
 	if _, err := center.actionDelaySeconds(ctx, db.AutomationAction{ActionType: ActionSendCard, CardID: disabledID}); err == nil {
 		t.Fatal("disabled card must not be executed")
 	}
-	if _, _, err := center.cardContent(ctx, &db.CardFull{ID: 99, Type: "text", Enabled: true}); err == nil {
-		t.Fatal("empty text card must not produce a successful send")
+	emptyID, err := store.Cards.Create(ctx, &db.CardFull{Name: "empty", Enabled: true, UserID: admin.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.sendCard(ctx, Task{AccountID: "cid", ChatID: "chat", BuyerID: "buyer"}, db.AutomationAction{
+		ActionType: ActionSendCard, CardID: emptyID, DeliveryCount: 1, ConfigJSON: `{}`,
+	}); err == nil {
+		t.Fatal("empty card must not produce a successful send")
 	}
 }
 
@@ -405,9 +425,12 @@ func TestSendDataCardKeepsConsumedInventoryWhenDeliveryResultIsUncertain(t *test
 	ctx := context.Background()
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 	cardID, err := store.Cards.Create(ctx, &db.CardFull{
-		Name: "data", Type: "data", DataContent: "secret-1\nsecret-2", Enabled: true, UserID: admin.ID,
+		Name: "data", Enabled: true, UserID: admin.ID,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cards.AddItems(ctx, cardID, "secret-1\nsecret-2"); err != nil {
 		t.Fatal(err)
 	}
 	sender := &testSender{err: errors.New("temporary send failure")}
@@ -418,7 +441,8 @@ func TestSendDataCardKeepsConsumedInventoryWhenDeliveryResultIsUncertain(t *test
 	if err == nil {
 		t.Fatal("send failure must be returned")
 	}
-	reserved, err := store.Cards.ConsumeBatchData(ctx, cardID)
+	// 结果不确定时保留第一条已用状态，下一位买家只会拿到第二条。
+	_, reserved, err := store.Cards.ReserveDataItem(ctx, cardID, db.CardItemMeta{})
 	if err != nil || reserved != "secret-2" {
 		t.Fatalf("uncertain send must not expose the same secret again: got=%q err=%v", reserved, err)
 	}
@@ -673,10 +697,18 @@ func TestCenterOrderPaidFetchesOrderDetailMatchesSpecAndQuantity(t *testing.T) {
 	if _, err := store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-1','会员',1)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,data_content,enabled,user_id) VALUES
-		(11,'30天库存','data','A1'||char(10)||'A2'||char(10)||'A3'||char(10)||'A4',1,?),
-		(12,'90天库存','data','B1'||char(10)||'B2'||char(10)||'B3'||char(10)||'B4',1,?)`, admin.ID, admin.ID); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES
+		(11,'30天库存',1,?),
+		(12,'90天库存',1,?)`, admin.ID, admin.ID); err != nil {
 		t.Fatal(err)
+	}
+	for _, seed := range []struct {
+		cardID  int64
+		content string
+	}{{11, "A1\nA2\nA3\nA4"}, {12, "B1\nB2\nB3\nB4"}} {
+		if _, err := store.Cards.AddItems(ctx, seed.cardID, seed.content); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ruleID, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-1", Name: "付款后自动发货", TriggerType: TriggerOrderPaid,
@@ -782,9 +814,12 @@ func TestCenterOrderPaidSendsAllCardActionsForSameSpec(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-bundle','组合商品',1)`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES
-		(41,'主卡库存','text','MAIN-CARD',1,?),
-		(42,'附赠卡库存','text','GIFT-CARD',1,?)`, admin.ID, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES
+		(41,'主卡库存',1,?),
+		(42,'附赠卡库存',1,?)`, admin.ID, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES
+		(41,?,'MAIN-CARD','available'),
+		(42,?,'GIFT-CARD','available')`, admin.ID, admin.ID)
 	_, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-bundle", Name: "组合商品自动发货", TriggerType: TriggerOrderPaid,
 		Enabled: true, Priority: 100,
@@ -828,7 +863,8 @@ func TestCenterOrderPaidDoesNotConfirmWhenNoCardSpecMatches(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-1','会员',1)`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES (21,'30天库存','text','A',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (21,'30天库存',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (21,?,'A','available')`, admin.ID)
 	_, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-1", Name: "付款后自动发货", TriggerType: TriggerOrderPaid,
 		Enabled: true, Priority: 100,
@@ -871,7 +907,8 @@ func TestCenterOrderPaidSendsCardBeforeConfirmShipment(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title) VALUES ('cid','item-1','会员')`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES (31,'默认库存','text','CARD-1',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (31,'默认库存',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (31,?,'CARD-1','available')`, admin.ID)
 	_, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-1", Name: "付款后自动发货", TriggerType: TriggerOrderPaid,
 		Enabled: true, Priority: 100,
@@ -1066,9 +1103,12 @@ func TestManualFullDeliveryIsImmediateIdempotentAndForcesConfirmation(t *testing
 	_, _ = store.DB.ExecContext(ctx, `UPDATE cookies SET auto_confirm=0 WHERE id='cid'`)
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title) VALUES ('cid','manual-item','会员')`)
 	cardID, err := store.Cards.Create(ctx, &db.CardFull{
-		Name: "manual-card", Type: "text", TextContent: "MANUAL-CARD", Enabled: true, DelaySeconds: 86400, UserID: admin.ID,
+		Name: "manual-card", Enabled: true, DelaySeconds: 86400, UserID: admin.ID,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cards.AddItems(ctx, cardID, "MANUAL-CARD"); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.Automation.Create(ctx, db.AutomationRuleInput{
@@ -1134,7 +1174,8 @@ func TestCenterNotifiesOnDeliverySuccess(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-n','N',1)`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES (61,'卡','text','CARD',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (61,'卡',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (61,?,'CARD','available')`, admin.ID)
 	_, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-n", Name: "通知测试", TriggerType: TriggerOrderPaid,
 		Enabled: true, Priority: 100,
@@ -1178,7 +1219,8 @@ func TestCenterNotifiesOnDeliveryFailure(t *testing.T) {
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
 
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-f','F',1)`)
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,text_content,enabled,user_id) VALUES (71,'卡','text','CARD',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (71,'卡',1,?)`, admin.ID)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (71,?,'CARD','available')`, admin.ID)
 	_, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-f", Name: "失败通知测试", TriggerType: TriggerOrderPaid,
 		Enabled: true, Priority: 100,

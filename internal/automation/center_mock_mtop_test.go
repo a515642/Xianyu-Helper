@@ -87,11 +87,14 @@ func TestConfirmShipmentRetriesFromCheckpointWithoutResendingCard(t *testing.T) 
 	defer cleanup()
 	ctx := context.Background()
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
-	res, err := store.DB.ExecContext(ctx, `INSERT INTO cards (name,type,text_content,enabled,user_id) VALUES ('gift','text','ONLY-ONCE',1,?)`, admin.ID)
+	res, err := store.DB.ExecContext(ctx, `INSERT INTO cards (name,enabled,user_id) VALUES ('gift',1,?)`, admin.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cardID, _ := res.LastInsertId()
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (?,?,'ONLY-ONCE','available')`, cardID, admin.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "checkpoint-item", Name: "checkpoint",
 		TriggerType: TriggerOrderPaid, Enabled: true,
@@ -176,7 +179,8 @@ func TestCenterConfirmShipment_MockMTopConsigError(t *testing.T) {
 
 	// 插入卡密 + 多规格商品 + 付款发货规则（含 confirm_shipment 动作）。
 	store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id,item_id,item_title,is_multi_spec) VALUES ('cid','item-1','会员',1)`)
-	store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,type,data_content,enabled,user_id) VALUES (50,'卡','data','K1',1,?)`, admin.ID)
+	store.DB.ExecContext(ctx, `INSERT INTO cards (id,name,enabled,user_id) VALUES (50,'卡',1,?)`, admin.ID)
+	store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (50,?,'K1','available')`, admin.ID)
 	store.Automation.Create(ctx, db.AutomationRuleInput{
 		UserID: admin.ID, CookieID: "cid", ItemID: "item-1", Name: "付款发货",
 		TriggerType: TriggerOrderPaid, Enabled: true, Priority: 100,

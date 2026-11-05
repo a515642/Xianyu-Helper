@@ -353,10 +353,7 @@ func (s *Server) normalizeAutomationRuleRequest(r *http.Request, userID int64, r
 			}
 			card, cardErr := s.Store.Cards.Get(r.Context(), act.CardID)
 			if cardErr != nil || card.UserID != userID {
-				return db.AutomationRuleInput{}, errStr("卡密组不存在或不属于当前用户")
-			}
-			if card.Type == "api" {
-				return db.AutomationRuleInput{}, errStr("API 卡密暂不支持自动发货，请选择文本、批量数据或图片卡密")
+				return db.AutomationRuleInput{}, errStr("卡种不存在或不属于当前用户")
 			}
 			hasSendCard = hasSendCard || enabled
 		case automation.ActionSendTemplate:
@@ -381,8 +378,8 @@ func (s *Server) normalizeAutomationRuleRequest(r *http.Request, userID int64, r
 				}
 				seenKeys[key] = true
 				card, cardErr := s.Store.Cards.Get(r.Context(), binding.CardID)
-				if cardErr != nil || card.UserID != userID || !card.Enabled || (card.Type != "text" && card.Type != "data") {
-					return db.AutomationRuleInput{}, errStr("发货模板只能绑定启用的文本或批量数据卡密组")
+				if cardErr != nil || card.UserID != userID || !card.Enabled || (card.Kind != db.CardKindText && card.Kind != db.CardKindCard) {
+					return db.AutomationRuleInput{}, errStr("发货模板只能绑定启用的文本或批量卡密卡种")
 				}
 			}
 			hasSendCard = hasSendCard || enabled

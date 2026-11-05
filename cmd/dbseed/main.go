@@ -264,7 +264,7 @@ func seedOrders(ctx context.Context, source *sql.DB, target *db.Store, accountID
 }
 
 func seedCards(ctx context.Context, source *sql.DB, target *db.Store, userID int64, limit int) (int, error) {
-	rows, err := source.QueryContext(ctx, `SELECT COALESCE(name,''),type,COALESCE(delay_seconds,0)
+	rows, err := source.QueryContext(ctx, `SELECT COALESCE(name,''),COALESCE(delay_seconds,0)
 		FROM cards ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return 0, err
@@ -272,21 +272,33 @@ func seedCards(ctx context.Context, source *sql.DB, target *db.Store, userID int
 	defer rows.Close()
 	count := 0
 	for rows.Next() {
-		var name, cardType string
+		var name string
 		var delay int
-		if err := rows.Scan(&name, &cardType, &delay); err != nil {
+		if err := rows.Scan(&name, &delay); err != nil {
 			return count, err
 		}
 		card := &db.CardFull{
-			Name: fmt.Sprintf("[Docker测试] %s %d", fallback(name, "SQLite 卡密"), count+1),
-			Type: "text", TextContent: "Docker 脱敏测试发货内容", Enabled: true,
-			Description: "从本地 SQLite 元数据生成，不包含真实卡密", DelaySeconds: delay, UserID: userID,
+			Name:         fmt.Sprintf("[Docker测试] %s %d", fallback(name, "SQLite 卡密"), count+1),
+			Kind:         db.CardKindCard,
+			Enabled:      true,
+			Description:  "从本地 SQLite 元数据生成，不包含真实卡密",
+			DelaySeconds: delay,
+			UserID:       userID,
 		}
-		if cardType == "data" {
-			card.Type = "data"
-			card.DataContent = fmt.Sprintf("DOCKER-FIXTURE-%03d-A\nDOCKER-FIXTURE-%03d-B", count+1, count+1)
+		// 交替生成批量卡密与固定文本，覆盖两类交付路径。
+		if count%2 == 1 {
+			card.Kind = db.CardKindText
 		}
-		if _, err := target.Cards.Create(ctx, card); err != nil {
+		id, err := target.Cards.Create(ctx, card)
+		if err != nil {
+			return count, err
+		}
+		if card.Kind == db.CardKindCard {
+			if _, err := target.Cards.AddItems(ctx, id,
+				fmt.Sprintf("DOCKER-FIXTURE-%03d-A\nDOCKER-FIXTURE-%03d-B", count+1, count+1)); err != nil {
+				return count, err
+			}
+		} else if _, err := target.Cards.AddItems(ctx, id, "Docker 脱敏测试发货内容"); err != nil {
 			return count, err
 		}
 		count++

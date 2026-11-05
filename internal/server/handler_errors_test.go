@@ -59,29 +59,26 @@ func TestCardEndpointsErrorBranches(t *testing.T) {
 		t.Fatalf("非法请求体应 400，got %d", rec3.Code)
 	}
 
-	// 创建卡券缺类型 → 400（decodeCard 校验）。
-	req4 := httptest.NewRequest(http.MethodPost, "/cards", strings.NewReader(`{"name":"无类型卡"}`))
+	// 创建卡种缺名称 → 400（decodeCard 校验）。
+	req4 := httptest.NewRequest(http.MethodPost, "/cards", strings.NewReader(`{"name":"  "}`))
 	req4.AddCookie(cookie)
 	rec4 := httptest.NewRecorder()
 	h.ServeHTTP(rec4, req4)
 	if rec4.Code != http.StatusBadRequest {
-		t.Fatalf("缺类型应 400，got %d body=%s", rec4.Code, rec4.Body.String())
+		t.Fatalf("缺名称应 400，got %d body=%s", rec4.Code, rec4.Body.String())
 	}
 }
 
-func TestCreateCardRejectsUnsupportedAPITypeAndInvalidDelay(t *testing.T) {
+func TestCreateCardRejectsInvalidDelayAndEmptyName(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)
 	defer cleanup()
 	h := srv.Router()
 	cookie := loginHelper(t, h)
 
 	for _, body := range []string{
-		`{"name":"API 卡密","type":"api","enabled":true}`,
-		`{"name":"非法类型","type":"unknown","enabled":true}`,
-		`{"name":"延时错误","type":"text","text_content":"x","delay_seconds":3601,"enabled":true}`,
-		`{"name":"空文本","type":"text","text_content":"  ","enabled":true}`,
-		`{"name":"空库存","type":"data","data_content":"\n","enabled":true}`,
-		`{"name":"空图片","type":"image","image_url":"","enabled":true}`,
+		`{"name":"延时错误","delay_seconds":3601,"enabled":true}`,
+		`{"name":"延时负数","delay_seconds":-1,"enabled":true}`,
+		`{"name":"","enabled":true}`,
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/cards", strings.NewReader(body))
 		req.AddCookie(cookie)
@@ -90,6 +87,15 @@ func TestCreateCardRejectsUnsupportedAPITypeAndInvalidDelay(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body=%s status=%d want 400", body, rec.Code)
 		}
+	}
+
+	// 只填名称即可创建卡种（内容在卡种管理里添加）。
+	req := httptest.NewRequest(http.MethodPost, "/cards", strings.NewReader(`{"name":"只填名称","enabled":true}`))
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("仅名称应创建成功，got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

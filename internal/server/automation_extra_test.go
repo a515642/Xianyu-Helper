@@ -17,8 +17,8 @@ func TestAutomationRulesCRUD(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
 	ctx := context.Background()
-	// 准备一个卡密组用于 send_card 动作。
-	cardID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "卡密组1", Type: "text", TextContent: "卡密ABC", Enabled: true, UserID: 1})
+	// 准备一个卡种用于 send_card 动作。
+	cardID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "卡密组1", Enabled: true, UserID: 1})
 	// 准备一个商品。
 	store.DB.ExecContext(ctx, `INSERT INTO item_info (cookie_id, item_id, item_title) VALUES ('acc1','it-auto','商品A')`)
 	h := srv.Router()
@@ -192,28 +192,6 @@ func TestAutomationRuleBadActionType(t *testing.T) {
 	}
 }
 
-func TestAutomationRuleRejectsAPICard(t *testing.T) {
-	srv, store, cleanup := newTestServer(t)
-	defer cleanup()
-	cardID, err := store.Cards.Create(context.Background(), &db.CardFull{
-		Name: "旧 API 卡密", Type: "api", APIConfig: `{"url":"https://example.com"}`, Enabled: true, UserID: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = store.DB.ExecContext(context.Background(), `INSERT INTO item_info (cookie_id,item_id,item_title) VALUES ('acc1','it-auto','商品')`)
-	h := srv.Router()
-	cookie := loginHelper(t, h)
-	body := `{"cookie_id":"acc1","item_id":"it-auto","trigger_type":"order_paid","actions":[{"action_type":"send_card","card_id":` + itoa(cardID) + `}]}`
-	req := httptest.NewRequest(http.MethodPost, "/automation-rules", strings.NewReader(body))
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "API 卡密暂不支持") {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
 // TestAutomationRuleSendCardMissingCardID send_card 缺 card_id 400。
 func TestAutomationRuleRejectsAccountScopeForProductTriggers(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)
@@ -328,7 +306,7 @@ func TestAutomationRuleNoActions(t *testing.T) {
 func TestAutomationRuleRejectsIncompatibleTriggerActions(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
-	cardID, err := store.Cards.Create(context.Background(), &db.CardFull{Name: "card", Type: "text", TextContent: "x", Enabled: true, UserID: 1})
+	cardID, err := store.Cards.Create(context.Background(), &db.CardFull{Name: "card", Enabled: true, UserID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

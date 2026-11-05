@@ -975,33 +975,42 @@ func (c *Center) sendCard(ctx context.Context, task Task, action db.AutomationAc
 		return 0, err
 	}
 	if !card.Enabled {
-		return 0, fmt.Errorf("卡密组 %d 已停用", card.ID)
+		return 0, fmt.Errorf("卡种 %d 已停用", card.ID)
 	}
-	if card.Type == "data" {
+	switch card.Kind {
+	case db.CardKindCard:
 		return c.sendDataCard(ctx, task, card, count)
-	}
-	sent := 0
-	for i := 0; i < count; i++ {
-		content, imageURL, err := c.cardContent(ctx, card)
-		if err != nil {
-			return sent, err
+	case db.CardKindText:
+		content, contentErr := c.store.Cards.FirstItemContent(ctx, card.ID)
+		if contentErr != nil {
+			return 0, fmt.Errorf("文本卡种 %d 缺少内容", card.ID)
 		}
-		if imageURL != "" {
-			if err := c.sendImage(ctx, task, imageURL, card.ID); err != nil {
-				return sent, classifyMessageSendError(err)
-			}
-		}
-		if strings.TrimSpace(content) != "" {
+		sent := 0
+		for i := 0; i < count; i++ {
 			if err := c.sendText(ctx, task, renderTemplate(content, task)); err != nil {
 				return sent, classifyMessageSendError(err)
 			}
+			sent++
 		}
-		if strings.TrimSpace(content) == "" && strings.TrimSpace(imageURL) == "" {
-			return sent, fmt.Errorf("卡密组 %d 没有可发送内容", card.ID)
+		return sent, nil
+	case db.CardKindImage:
+		imageURL, contentErr := c.store.Cards.FirstItemContent(ctx, card.ID)
+		if contentErr != nil || strings.TrimSpace(imageURL) == "" {
+			return 0, fmt.Errorf("图片卡种 %d 缺少图片 URL", card.ID)
 		}
-		sent++
+		sent := 0
+		for i := 0; i < count; i++ {
+			if err := c.sendImage(ctx, task, imageURL, card.ID); err != nil {
+				return sent, classifyMessageSendError(err)
+			}
+			sent++
+		}
+		return sent, nil
+	case "":
+		return 0, fmt.Errorf("卡种 %d 尚未添加卡密", card.ID)
+	default:
+		return 0, fmt.Errorf("未知卡种类型: %s", card.Kind)
 	}
-	return sent, nil
 }
 
 func (c *Center) sendTemplate(ctx context.Context, task Task, action db.AutomationAction) (int, error) {
@@ -1013,8 +1022,8 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 	}
 	values := map[string]string{}
 	type reservedCard struct {
-		cardID  int64
-		content string
+		cardID int64
+		itemID int64
 	}
 	reserved := make([]reservedCard, 0)
 	restoreReserved := func() error {
@@ -1022,7 +1031,7 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 		for index := len(reserved) - 1; index >= 0; index-- {
 			entry := reserved[index]
 			unlock := c.lockCard(entry.cardID)
-			err := c.store.Cards.RestoreBatchData(ctx, entry.cardID, entry.content)
+			err := c.store.Cards.ReleaseDataItem(ctx, entry.itemID)
 			unlock()
 			if err != nil {
 				restoreErr = errors.Join(restoreErr, err)
@@ -1035,8 +1044,8 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 		if err != nil {
 			return 0, err
 		}
-		if !card.Enabled || (card.Type != "text" && card.Type != "data") {
-			return 0, fmt.Errorf("模板卡密组不可用")
+		if !card.Enabled || (card.Kind != db.CardKindText && card.Kind != db.CardKindCard) {
+			return 0, fmt.Errorf("模板卡种不可用")
 		}
 		count := binding.DeliveryCount
 		if count <= 0 {
@@ -1044,26 +1053,27 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 		}
 		count *= maxDeliveryQuantity(task.Quantity)
 		lines := make([]string, 0, count)
-		if card.Type == "text" {
+		if card.Kind == db.CardKindText {
+			content, contentErr := c.store.Cards.FirstItemContent(ctx, card.ID)
+			if contentErr != nil {
+				return 0, fmt.Errorf("模板卡种 %d 缺少内容", card.ID)
+			}
 			for i := 0; i < count; i++ {
-				lines = append(lines, card.TextContent)
+				lines = append(lines, content)
 			}
 		} else {
 			unlock := c.lockCard(card.ID)
 			for i := 0; i < count; i++ {
-				content, consumeErr := c.store.Cards.ConsumeBatchData(ctx, card.ID)
+				itemID, content, consumeErr := c.store.Cards.ReserveDataItem(ctx, card.ID, c.cardItemMeta(task))
 				if consumeErr != nil {
 					unlock()
-					for _, restored := range lines {
-						reserved = append(reserved, reservedCard{cardID: card.ID, content: restored})
-					}
 					if restoreErr := restoreReserved(); restoreErr != nil {
 						return 0, uncertainAction(errors.Join(consumeErr, restoreErr))
 					}
 					return 0, consumeErr
 				}
 				lines = append(lines, content)
-				reserved = append(reserved, reservedCard{cardID: card.ID, content: content})
+				reserved = append(reserved, reservedCard{cardID: card.ID, itemID: itemID})
 			}
 			unlock()
 		}
@@ -1102,25 +1112,43 @@ func (c *Center) sendDataCard(ctx context.Context, task Task, card *db.CardFull,
 	defer unlock()
 	sent := 0
 	for i := 0; i < count; i++ {
-		content, err := c.store.Cards.ConsumeBatchData(ctx, card.ID)
+		itemID, content, err := c.store.Cards.ReserveDataItem(ctx, card.ID, c.cardItemMeta(task))
 		if err != nil {
 			return sent, err
 		}
 		if strings.TrimSpace(content) != "" {
 			if err := c.sendText(ctx, task, renderTemplate(content, task)); err != nil {
 				if errors.Is(err, ErrMessageNotSent) {
-					if restoreErr := c.store.Cards.RestoreBatchData(ctx, card.ID, content); restoreErr != nil {
-						return sent, uncertainAction(errors.Join(err, fmt.Errorf("恢复未发送卡密库存: %w", restoreErr)))
+					if releaseErr := c.store.Cards.ReleaseDataItem(ctx, itemID); releaseErr != nil {
+						return sent, uncertainAction(errors.Join(err, fmt.Errorf("恢复未发送卡密库存: %w", releaseErr)))
 					}
 					return sent, err
 				}
-				// 请求已经交给传输层后无法判断远端是否收到，保留消费状态并人工核对。
+				// 请求已经交给传输层后无法判断远端是否收到，保留已用状态并人工核对。
 				return sent, uncertainAction(err)
 			}
 		}
 		sent++
 	}
 	return sent, nil
+}
+
+// cardItemMeta 描述一次发货预留要写回的售出归属，供卡密列表按买家/订单查询。
+func (c *Center) cardItemMeta(task Task) db.CardItemMeta {
+	buyerName := strings.TrimSpace(task.BuyerName)
+	if buyerName == "" && c != nil && c.store != nil && c.store.Chats != nil && task.AccountID != "" && task.ChatID != "" {
+		if name, err := c.store.Chats.LatestUnmaskedPeerName(context.Background(), task.AccountID, task.ChatID); err == nil {
+			buyerName = name
+		}
+	}
+	return db.CardItemMeta{
+		BuyerID:   task.BuyerID,
+		BuyerName: buyerName,
+		OrderID:   task.OrderID,
+		SpecName:  task.SpecName,
+		SpecValue: task.SpecValue,
+		Quantity:  maxDeliveryQuantity(task.Quantity),
+	}
 }
 
 func classifyMessageSendError(err error) error {
@@ -1200,27 +1228,6 @@ func parsePositiveInt(raw string) int {
 		return 0
 	}
 	return n
-}
-
-func (c *Center) cardContent(ctx context.Context, card *db.CardFull) (text, imageURL string, err error) {
-	switch card.Type {
-	case "text":
-		if strings.TrimSpace(card.TextContent) == "" {
-			return "", "", fmt.Errorf("文本卡密组缺少内容")
-		}
-		return card.TextContent, "", nil
-	case "data":
-		return "", "", fmt.Errorf("data 卡密必须通过 sendDataCard 发送")
-	case "image":
-		if strings.TrimSpace(card.ImageURL) == "" {
-			return "", "", fmt.Errorf("图片卡密组缺少图片 URL")
-		}
-		return "", card.ImageURL, nil
-	case "api":
-		return "", "", fmt.Errorf("自动化中心暂不支持 API 卡密动作")
-	default:
-		return "", "", fmt.Errorf("未知卡密类型: %s", card.Type)
-	}
 }
 
 func (c *Center) sendText(ctx context.Context, task Task, text string) error {

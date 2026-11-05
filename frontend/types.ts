@@ -191,34 +191,61 @@ export interface Order {
 }
 
 // Cards
+// 卡密类型（卡种属性）：card=批量卡密（一次性消耗），text=固定文本，image=固定图片。
+export type CardKind = 'card' | 'text' | 'image';
+
 export interface Card {
   id: number;
   name: string;
-  type: 'api' | 'text' | 'data' | 'image';
   description?: string;
   enabled: boolean;
-  // 文本类型
-  text_content?: string;
-  // 批量数据类型
-  data_content?: string;
-  // API 类型配置
-  api_config?: {
-    url: string;
-    method: 'GET' | 'POST';
-    timeout?: number;
-    headers?: string;
-    params?: string;
-  };
-  // 图片类型
-  image_url?: string;
-  // 通用配置
   delay_seconds?: number;
   // 多规格配置
   is_multi_spec?: boolean;
   spec_name?: string;
   spec_value?: string;
+  kind: CardKind;
+  item_count?: number;
+  // 库存统计（卡种列表/详情带出）
+  stock?: CardStock;
   created_at: string;
   updated_at: string;
+}
+
+// 卡密条目（逐条状态管理）
+export type CardItemStatus = 'available' | 'used' | 'void';
+
+export interface CardStock {
+  card_id: number;
+  total: number;
+  available: number;
+  used: number;
+  void: number;
+}
+
+export interface CardItem {
+  id: number;
+  card_id: number;
+  card_name?: string;
+  content: string;
+  status: CardItemStatus;
+  buyer_id: string;
+  buyer_name: string;
+  order_id: string;
+  spec_name: string;
+  spec_value: string;
+  quantity: number;
+  sold_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CardItemPage {
+  items: CardItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 // Items
@@ -307,7 +334,7 @@ export interface ShippingVariant {
   template_bindings?: DeliveryTemplateBinding[];
   card_id: number;
   card_name?: string;
-  card_type?: Card['type'];
+  card_type?: CardKind;
   delivery_count: number;
   enabled: boolean;
   delay_override?: boolean;

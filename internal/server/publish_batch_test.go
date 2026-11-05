@@ -737,7 +737,7 @@ func TestCardOwnedByUser(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
 	ctx := context.Background()
-	store.DB.ExecContext(ctx, `INSERT INTO cards (name, type, user_id) VALUES ('卡1','text',1)`)
+	store.DB.ExecContext(ctx, `INSERT INTO cards (name, user_id) VALUES ('卡1',1)`)
 	if !srv.cardOwnedByUser(ctx, 1, 1) {
 		t.Fatal("card 1 应属于 user 1")
 	}

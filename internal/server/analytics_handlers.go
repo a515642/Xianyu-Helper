@@ -67,22 +67,12 @@ func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	counts["active_cookies"] = activeCookies
-	cards, err := s.Store.Cards.AllForUser(r.Context(), sess.UserID)
+	stock, err := s.Store.Cards.Stock(r.Context(), sess.UserID, 0)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "统计卡密库存失败")
 		return
 	}
-	var available int64
-	for _, card := range cards {
-		if card.Enabled && card.Type == "data" {
-			for _, line := range strings.Split(strings.ReplaceAll(card.DataContent, "\r\n", "\n"), "\n") {
-				if strings.TrimSpace(line) != "" {
-					available++
-				}
-			}
-		}
-	}
-	counts["available_card_stock"] = available
+	counts["available_card_stock"] = stock.Available
 
 	writeJSON(w, http.StatusOK, counts)
 }

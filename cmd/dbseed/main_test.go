@@ -22,7 +22,8 @@ func TestSeedFromSQLiteCopiesMetadataAndSanitizesSecrets(t *testing.T) {
 	source.Cookies.Save(ctx, "real-account", "unb=real-secret; _m_h5_tk=secret;", user.ID)
 	source.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: "real-account", ItemID: "real-item", ItemTitle: "真实商品", ItemPrice: "19.90"})
 	source.Orders.Upsert(ctx, "real-order", db.OrderUpsertOpts{CookieID: "real-account", ItemID: "real-item", BuyerID: "real-buyer", Amount: "19.90", OrderStatus: "completed"})
-	source.Cards.Create(ctx, &db.CardFull{Name: "真实卡密", Type: "data", DataContent: "SECRET-CODE", Enabled: true, UserID: user.ID})
+	sourceCardID, _ := source.Cards.Create(ctx, &db.CardFull{Name: "真实卡密", Enabled: true, UserID: user.ID})
+	source.Cards.AddItems(ctx, sourceCardID, "SECRET-CODE")
 
 	targetDB, targetDialect, err := db.Open(ctx, filepath.Join(t.TempDir(), "target.db"))
 	if err != nil {
@@ -48,8 +49,17 @@ func TestSeedFromSQLiteCopiesMetadataAndSanitizesSecrets(t *testing.T) {
 		t.Fatalf("fixture admin missing or inactive: user=%+v err=%v", fixtureAdmin, adminErr)
 	}
 	cards, _ := target.Cards.AllForUser(ctx, fixtureUser.ID)
-	if len(cards) != 1 || strings.Contains(cards[0].DataContent, "SECRET-CODE") {
-		t.Fatalf("source card secret leaked: %+v", cards)
+	if len(cards) != 1 {
+		t.Fatalf("fixture cards = %+v", cards)
+	}
+	if items, _, err := target.Cards.ListItems(ctx, db.CardItemFilter{UserID: fixtureUser.ID}); err != nil || len(items) != 2 {
+		t.Fatalf("fixture card items = %+v err=%v", items, err)
+	} else {
+		for _, item := range items {
+			if strings.Contains(item.Content, "SECRET-CODE") {
+				t.Fatalf("source card secret leaked: %+v", item)
+			}
+		}
 	}
 	invalidOrder, err := target.Orders.Get(ctx, "docker-invalid-amount")
 	if err != nil || invalidOrder.Amount != "not-a-number" {

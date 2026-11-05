@@ -361,13 +361,17 @@ func TestCards_CRUD(t *testing.T) {
 	uid, _ := seedAccount(t, s)
 
 	cf := &CardFull{
-		Name: "卡密A", Type: "text", TextContent: "AAA", Enabled: true,
+		Name: "卡密A", Enabled: true,
 		UserID: uid, DelaySeconds: 5, IsMultiSpec: true, SpecName: "颜色", SpecValue: "红",
-		APIConfig: `{"k":"v"}`, ImageURL: "http://img", Description: "desc",
+		Description: "desc",
 	}
 	id, err := s.Cards.Create(ctx, cf)
 	if err != nil || id == 0 {
 		t.Fatalf("Create: id=%d err=%v", id, err)
+	}
+	// 卡种本身不含内容；添加两条批量卡密后应带出类型与库存。
+	if _, err := s.Cards.AddItems(ctx, id, "K1\nK2"); err != nil {
+		t.Fatal(err)
 	}
 
 	// Get 验证全部字段。
@@ -375,27 +379,29 @@ func TestCards_CRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Name != "卡密A" || got.Type != "text" || got.TextContent != "AAA" || !got.Enabled ||
+	if got.Name != "卡密A" || !got.Enabled ||
 		got.DelaySeconds != 5 || !got.IsMultiSpec || got.SpecName != "颜色" || got.SpecValue != "红" ||
-		got.APIConfig != `{"k":"v"}` || got.ImageURL != "http://img" || got.Description != "desc" || got.UserID != uid {
+		got.Description != "desc" || got.UserID != uid {
 		t.Fatalf("card 字段不符: %#v", got)
+	}
+	if got.Kind != CardKindCard || got.ItemCount != 2 || got.Stock == nil || got.Stock.Available != 2 {
+		t.Fatalf("卡种类型/库存不符: %#v", got)
 	}
 
 	// Update 改字段。
 	got.Name = "卡密B"
 	got.Enabled = false
 	got.IsMultiSpec = false
-	got.TextContent = "BBB"
 	if err := s.Cards.Update(ctx, got); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	got2, _ := s.Cards.Get(ctx, id)
-	if got2.Name != "卡密B" || got2.Enabled || got2.IsMultiSpec || got2.TextContent != "BBB" {
+	if got2.Name != "卡密B" || got2.Enabled || got2.IsMultiSpec {
 		t.Fatalf("Update 后字段不符: %#v", got2)
 	}
 
 	// AllForUser：先建第二张卡券。
-	id2, _ := s.Cards.Create(ctx, &CardFull{Name: "卡密C", Type: "data", DataContent: "x\ny", Enabled: true, UserID: uid})
+	id2, _ := s.Cards.Create(ctx, &CardFull{Name: "卡密C", Enabled: true, UserID: uid})
 	all, err := s.Cards.AllForUser(ctx, uid)
 	if err != nil {
 		t.Fatalf("AllForUser: %v", err)
@@ -474,41 +480,49 @@ func TestCards_ConsumeBatchData(t *testing.T) {
 	ctx := context.Background()
 	uid, _ := seedAccount(t, s)
 
-	// 不存在的卡券 → ErrNotFound。
-	if _, err := s.Cards.ConsumeBatchData(ctx, 99999); !errors.Is(err, ErrNotFound) {
+	// 不存在的卡种 → ErrNotFound。
+	if _, err := s.Cards.AddItems(ctx, 99999, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 
-	// data_content 为空 → 报错“批量数据为空”。
-	cf := &CardFull{Name: "data", Type: "data", UserID: uid, Enabled: true}
+	// 空库存 → 无可用卡密。
+	cf := &CardFull{Name: "data", UserID: uid, Enabled: true}
 	id, _ := s.Cards.Create(ctx, cf)
-	if _, err := s.Cards.ConsumeBatchData(ctx, id); err == nil || !strings.Contains(err.Error(), "为空") {
-		t.Fatalf("空批量应报错, got %v", err)
+	if _, _, err := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{}); !errors.Is(err, ErrCardStockEmpty) {
+		t.Fatalf("空批量应报缺货, got %v", err)
 	}
 
 	// 写入多行（含 \r\n 与空行），逐行消费。
-	cf.DataContent = "line1\r\nline2\n\nline3\r"
-	// 直接 UPDATE 因为 Create 已把 data_content 设空。
-	if _, err := s.DB.ExecContext(ctx, `UPDATE cards SET data_content=? WHERE id=?`, "line1\r\nline2\n\nline3\r", id); err != nil {
+	if _, err := s.Cards.AddItems(ctx, id, "line1\r\nline2\n\nline3\r"); err != nil {
 		t.Fatal(err)
 	}
 
 	// 第一次消费 → line1，剩余 line2/line3。
-	first, err := s.Cards.ConsumeBatchData(ctx, id)
+	_, first, err := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{BuyerID: "b1", OrderID: "o1"})
 	if err != nil || first != "line1" {
 		t.Fatalf("first=%q err=%v", first, err)
 	}
-	second, _ := s.Cards.ConsumeBatchData(ctx, id)
+	_, second, _ := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{})
 	if second != "line2" {
 		t.Fatalf("second=%q want line2", second)
 	}
-	third, _ := s.Cards.ConsumeBatchData(ctx, id)
+	_, third, _ := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{})
 	if third != "line3" {
 		t.Fatalf("third=%q want line3", third)
 	}
-	// 全部消费完 → 报错“为空”。
-	if _, err := s.Cards.ConsumeBatchData(ctx, id); err == nil || !strings.Contains(err.Error(), "为空") {
-		t.Fatalf("消费完后应报错, got %v", err)
+	// 全部消费完 → 缺货。
+	if _, _, err := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{}); !errors.Is(err, ErrCardStockEmpty) {
+		t.Fatalf("消费完后应缺货, got %v", err)
+	}
+
+	// 售出归属写回，库存统计正确。
+	stock, err := s.Cards.Stock(ctx, uid, id)
+	if err != nil || stock.Total != 3 || stock.Available != 0 || stock.Used != 3 {
+		t.Fatalf("stock=%+v err=%v", stock, err)
+	}
+	items, total, err := s.Cards.ListItems(ctx, CardItemFilter{UserID: uid, CardID: id, BuyerID: "b1"})
+	if err != nil || total != 1 || items[0].OrderID != "o1" || items[0].Status != CardItemUsed {
+		t.Fatalf("buyer filter items=%+v total=%d err=%v", items, total, err)
 	}
 }
 
@@ -517,62 +531,81 @@ func TestCards_RestoreBatchDataReturnsReservedValueToFront(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	uid, _ := seedAccount(t, s)
-	id, err := s.Cards.Create(ctx, &CardFull{
-		Name: "restore", Type: "data", DataContent: "first\nsecond", Enabled: true, UserID: uid,
-	})
+	id, err := s.Cards.Create(ctx, &CardFull{Name: "restore", Enabled: true, UserID: uid})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reserved, err := s.Cards.ConsumeBatchData(ctx, id)
+	if _, err := s.Cards.AddItems(ctx, id, "first\nsecond"); err != nil {
+		t.Fatal(err)
+	}
+	itemID, reserved, err := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{BuyerID: "b"})
 	if err != nil || reserved != "first" {
 		t.Fatalf("reserve=%q err=%v", reserved, err)
 	}
-	if err := s.Cards.RestoreBatchData(ctx, id, reserved); err != nil {
+	if err := s.Cards.ReleaseDataItem(ctx, itemID); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.Cards.ConsumeBatchData(ctx, id)
+	got, err := s.Cards.GetItem(ctx, itemID)
+	if err != nil || got.Status != CardItemAvailable || got.BuyerID != "" || got.OrderID != "" {
+		t.Fatalf("归还后条目=%+v err=%v", got, err)
+	}
+	// 归还的条目仍按最小 id 先出，因此再次消费得到 first。
+	_, again, err := s.Cards.ReserveDataItem(ctx, id, CardItemMeta{})
 	if err != nil || again != "first" {
 		t.Fatalf("restored value must be consumed first: got=%q err=%v", again, err)
 	}
 }
 
-// TestCards_AppendBatchData 追加卡密行 + 有效行计数。
-func TestCards_AppendBatchData(t *testing.T) {
+// TestCards_AddItems 添加卡密：批量按行、固定文本单条、库存统计。
+func TestCards_AddItems(t *testing.T) {
 	s, cleanup := newTestDB(t)
 	defer cleanup()
 	ctx := context.Background()
 	uid, _ := seedAccount(t, s)
 
 	// 不存在 → ErrNotFound。
-	if _, err := s.Cards.AppendBatchData(ctx, 99999, "x"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Cards.AddItems(ctx, 99999, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 
-	cf := &CardFull{Name: "data", Type: "data", UserID: uid, Enabled: true, DataContent: ""}
-	id, _ := s.Cards.Create(ctx, cf)
-
-	// 全是空行 → 报错“无有效卡密行”。
-	if _, err := s.Cards.AppendBatchData(ctx, id, "  \n\n\r\n"); err == nil || !strings.Contains(err.Error(), "无有效") {
-		t.Fatalf("空行应报错, got %v", err)
+	// 批量卡种：按行写入。
+	id, _ := s.Cards.Create(ctx, &CardFull{Name: "data", Kind: CardKindCard, UserID: uid, Enabled: true})
+	if _, err := s.Cards.AddItems(ctx, id, "  \n\n\r\n"); err == nil {
+		t.Fatal("空行应报错")
 	}
-
-	// 首次追加（空 existing）。
-	n, err := s.Cards.AppendBatchData(ctx, id, "a\nb")
+	n, err := s.Cards.AddItems(ctx, id, "a\nb")
 	if err != nil || n != 2 {
-		t.Fatalf("Append 首次: n=%d err=%v", n, err)
+		t.Fatalf("AddItems 首次: n=%d err=%v", n, err)
 	}
-	got, _ := s.Cards.Get(ctx, id)
-	if got.DataContent != "a\nb" {
-		t.Fatalf("data_content=%q want a\\nb", got.DataContent)
-	}
-	// 二次追加（existing 非空 → 换行拼接）。
-	n2, err := s.Cards.AppendBatchData(ctx, id, "c")
+	n2, err := s.Cards.AddItems(ctx, id, "c")
 	if err != nil || n2 != 1 {
-		t.Fatalf("Append 二次: n=%d err=%v", n2, err)
+		t.Fatalf("AddItems 二次: n=%d err=%v", n2, err)
 	}
-	got, _ = s.Cards.Get(ctx, id)
-	if got.DataContent != "a\nb\nc" {
-		t.Fatalf("data_content=%q want a\\nb\\nc", got.DataContent)
+	stock, _ := s.Cards.Stock(ctx, uid, id)
+	if stock.Available != 3 || stock.Total != 3 {
+		t.Fatalf("stock=%+v want available=3", stock)
+	}
+	// 空选择回库应报错。
+	if _, err := s.Cards.SetStatus(ctx, uid, []int64{}, CardItemAvailable); err == nil {
+		t.Fatal("空选择应报错")
+	}
+
+	// 固定文本卡种：整段一条，且只保留一条。
+	textID, _ := s.Cards.Create(ctx, &CardFull{Name: "text", Kind: CardKindText, UserID: uid, Enabled: true})
+	if _, err := s.Cards.AddItems(ctx, textID, "固定文案"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Cards.FirstItemContent(ctx, textID); got != "固定文案" {
+		t.Fatalf("FirstItemContent=%q", got)
+	}
+
+	// 固定图片卡种：内容就是图片 URL。
+	imageID, _ := s.Cards.Create(ctx, &CardFull{Name: "image", Kind: CardKindImage, UserID: uid, Enabled: true})
+	if _, err := s.Cards.AddItems(ctx, imageID, "https://cdn.example.com/a.png"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Cards.FirstItemContent(ctx, imageID); got != "https://cdn.example.com/a.png" {
+		t.Fatalf("FirstItemContent=%q", got)
 	}
 }
 
@@ -895,11 +928,13 @@ func TestAIReply_GetDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.ModelName != "qwen-plus" {
-		t.Fatalf("默认 model_name=%q want qwen-plus", got.ModelName)
+	// 不再回填默认模型名：未配置时保持为空，必须由用户显式选择。
+	if got.ModelName != "" {
+		t.Fatalf("未配置时 model_name 应为空, got %q", got.ModelName)
 	}
-	if got.BaseURL != "https://dashscope.aliyuncs.com/compatible-mode/v1" {
-		t.Fatalf("默认 base_url=%q", got.BaseURL)
+	// 不再回填默认 AI 地址：未配置时保持为空，必须由用户显式填写。
+	if got.BaseURL != "" {
+		t.Fatalf("未配置时 base_url 应为空, got %q", got.BaseURL)
 	}
 	if got.AIEnabled {
 		t.Fatal("ai_enabled 应 false")

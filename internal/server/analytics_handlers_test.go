@@ -116,12 +116,14 @@ func TestDashboardStatsAreAvailableAndScopedToCurrentUser(t *testing.T) {
 	if err := store.Cookies.Save(ctx, "member-acc", "unb=456", member.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (name,type,data_content,enabled,user_id) VALUES ('member-card','data',?,1,?)`, "CARD-1\n\nCARD-2\n", member.ID)
+	cardRes, _ := store.DB.ExecContext(ctx, `INSERT INTO cards (name,enabled,user_id) VALUES ('member-card',1,?)`, member.ID)
+	memberCardID, _ := cardRes.LastInsertId()
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO card_items (card_id,user_id,content,status) VALUES (?,?,'CARD-1','available'),(?,?,'CARD-2','available')`, memberCardID, member.ID, memberCardID, member.ID)
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO keywords (cookie_id,keyword,reply) VALUES ('member-acc','hi','hello')`)
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO orders (order_id,cookie_id,order_status) VALUES ('member-order','member-acc','completed')`)
 
 	// 管理员资源不能进入 member 的统计。
-	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (name,type,user_id) VALUES ('admin-card','text',1)`)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO cards (name,user_id) VALUES ('admin-card',1)`)
 	_, _ = store.DB.ExecContext(ctx, `INSERT INTO orders (order_id,cookie_id,order_status) VALUES ('admin-order','acc1','completed')`)
 
 	h := srv.Router()

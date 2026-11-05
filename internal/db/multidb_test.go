@@ -771,7 +771,7 @@ func TestMultiDB_LatestMigrationsDownUp(t *testing.T) {
 				t.Fatalf("set goose dialect: %v", err)
 			}
 			goose.SetBaseFS(migrationsFS)
-			for i := 0; i < 22; i++ {
+			for i := 0; i < 25; i++ {
 				if err := goose.Down(tg.store.DB, "migrations/"+subdir); err != nil {
 					t.Fatalf("migration down #%d: %v", i+1, err)
 				}
@@ -940,26 +940,28 @@ func TestMultiDB_CardsCreateGet(t *testing.T) {
 			user, _ := s.Users.GetByUsername(ctx, uid)
 
 			cf := &CardFull{
-				Name:        "测试卡密",
-				Type:        "text",
-				TextContent: "ABC-123",
-				Enabled:     true,
-				UserID:      user.ID,
+				Name:    "测试卡密",
+				Kind:    CardKindText,
+				Enabled: true,
+				UserID:  user.ID,
 			}
 			id, err := s.Cards.Create(ctx, cf)
 			if err != nil || id == 0 {
 				t.Fatalf("Create: id=%d err=%v", id, err)
 			}
+			if _, err := s.Cards.AddItems(ctx, id, "ABC-123"); err != nil {
+				t.Fatalf("AddItems: %v", err)
+			}
 			got, err := s.Cards.Get(ctx, id)
 			if err != nil {
 				t.Fatalf("Get: %v", err)
 			}
-			if got.Name != "测试卡密" || got.TextContent != "ABC-123" || !got.Enabled {
+			if got.Name != "测试卡密" || !got.Enabled || got.Kind != CardKindText {
 				t.Fatalf("card = %#v", got)
 			}
-			// 未设置的可空列应安全扫描为空串。
-			if got.ImageURL != "" || got.SpecName != "" || got.APIConfig != "" {
-				t.Fatalf("NULL 列扫描异常: image=%q spec=%q api=%q", got.ImageURL, got.SpecName, got.APIConfig)
+			// 未设置的可选列应安全扫描为空串。
+			if got.SpecName != "" || got.SpecValue != "" || got.Description != "" {
+				t.Fatalf("NULL 列扫描异常: spec=%q/%q desc=%q", got.SpecName, got.SpecValue, got.Description)
 			}
 		})
 	}

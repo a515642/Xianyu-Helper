@@ -502,7 +502,8 @@ func TestCreatePublishAutomationRules(t *testing.T) {
 	// 预置一个自动化规则配置的批次行，直接调 createPublishAutomationRules 验证不 panic + 写规则。
 	// 先建一个卡密组供规则引用。
 	admin, _ := store.Users.GetByUsername(ctx, "admin")
-	cardID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "卡", Type: "text", TextContent: "K", Enabled: true, UserID: admin.ID})
+	cardID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "卡", Enabled: true, UserID: admin.ID})
+	store.Cards.AddItems(ctx, cardID, "K")
 
 	sourceRuleID, err := store.Automation.Create(ctx, db.AutomationRuleInput{UserID: admin.ID, CookieID: "acc1", ItemID: "source-item", Name: "source", TriggerType: automation.TriggerOrderPaid, Enabled: true, Actions: []db.AutomationActionInput{{ActionType: automation.ActionSendCard, CardID: cardID, DeliveryCount: 1, DelaySeconds: 23, ConfigJSON: `{"delay_override":true}`, Enabled: true, SortOrder: 1}}})
 	if err != nil {

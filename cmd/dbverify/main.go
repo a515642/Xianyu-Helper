@@ -132,15 +132,15 @@ func main() {
 
 	// 6) 卡密创建（boolToInt 布尔写入）
 	cardID, err := store.Cards.Create(ctx, &db.CardFull{
-		Name: "测试卡组", Type: "data", DataContent: "card-1\ncard-2\ncard-3", Enabled: true, UserID: userID,
+		Name: "测试卡种", Kind: db.CardKindCard, Enabled: true, UserID: userID,
 	})
 	if err != nil {
 		fail("❌ 创建卡密失败: %v\n", err)
 	}
-	fmt.Printf("✅ 创建卡密组 (id=%d)\n", cardID)
+	fmt.Printf("✅ 创建卡种 (id=%d)\n", cardID)
 
-	// 7) 卡密批量追加（AppendBatchData）
-	added, err := store.Cards.AppendBatchData(ctx, cardID, "card-4\ncard-5")
+	// 7) 卡密批量追加（AddItems）
+	added, err := store.Cards.AddItems(ctx, cardID, "card-4\ncard-5")
 	if err != nil {
 		fail("❌ 追加卡密失败: %v\n", err)
 	}
@@ -248,7 +248,7 @@ func cleanupVerifyData(ctx context.Context, store *db.Store, ids verifyIDs) erro
 		{`DELETE FROM automation_rules WHERE cookie_id=? OR user_id=?`, []any{ids.accountID, userID}},
 		{`DELETE FROM message_notifications WHERE cookie_id=? OR channel_id IN (SELECT id FROM notification_channels WHERE user_id=? AND name=?)`, []any{ids.accountID, userID, "测试渠道"}},
 		{`DELETE FROM notification_channels WHERE user_id=? AND name=?`, []any{userID, "测试渠道"}},
-		{`DELETE FROM cards WHERE user_id=? AND name=?`, []any{userID, "测试卡组"}},
+		{`DELETE FROM cards WHERE user_id=?`, []any{userID}},
 		{`DELETE FROM item_info WHERE cookie_id=? AND item_id=?`, []any{ids.accountID, ids.itemID}},
 		{`DELETE FROM orders WHERE order_id=? OR cookie_id=?`, []any{ids.orderID, ids.accountID}},
 		{`DELETE FROM cookie_status WHERE cookie_id=?`, []any{ids.accountID}},

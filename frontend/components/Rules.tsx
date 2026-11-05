@@ -657,8 +657,8 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
           if (bindings.length !== template.keys.length || template.keys.some(key => {
             const binding = bindings.find(item => item.key === key);
             const card = binding ? cards.find(item => item.id === binding.card_id) : undefined;
-            return !binding || !binding.card_id || !card || !card.enabled || (card.type !== 'text' && card.type !== 'data') || binding.delivery_count < 1;
-          })) { alert('请为模板中的每个卡密引用选择启用的文本或批量数据卡密组'); return; }
+            return !binding || !binding.card_id || !card || !card.enabled || (card.kind !== 'text' && card.kind !== 'card') || binding.delivery_count < 1;
+          })) { alert('请为模板中的每个卡密引用选择启用的文本或批量卡密卡种'); return; }
         }
       }
       if (isMultiSpecRule && variants.some(variant => !variant.spec_name.trim() || !variant.spec_value.trim())) {
@@ -1590,7 +1590,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                                           className="w-full ios-input px-3 py-2.5 rounded-lg"
                                         >
                                           <option value="">选择卡密组</option>
-                                          {cards.filter(card => card.enabled && (card.type === 'text' || card.type === 'data')).map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
+                                          {cards.filter(card => card.enabled && (card.kind === 'text' || card.kind === 'card')).map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
                                         </select>
                                         <input
                                           type="number"
@@ -1616,7 +1616,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                                     className="w-full ios-input px-3 py-2.5 rounded-lg"
                                   >
                                     <option value="">请选择卡密库存</option>
-                                    {cards.filter(card => card.enabled && card.type !== 'api').map(card => (
+                                    {cards.filter(card => card.enabled).map(card => (
                                       <option key={card.id} value={card.id}>{card.name}</option>
                                     ))}
                                   </select>

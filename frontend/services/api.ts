@@ -1,7 +1,7 @@
 import { get, post, put, del, postForm, type RequestControlOptions } from '../request';
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
-  AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
+  AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
@@ -453,22 +453,11 @@ export const getValidOrders = async (dateRange: {start_date: string; end_date: s
 }
 
 // Cards
-const normalizeCard = (item: any): Card => {
-  let apiConfig = item.api_config;
-  if (typeof apiConfig === 'string' && apiConfig.trim()) {
-    try {
-      apiConfig = JSON.parse(apiConfig);
-    } catch {
-      apiConfig = undefined;
-    }
-  }
-  return {...item, api_config: apiConfig || undefined} as Card;
-};
+const normalizeCard = (item: any): Card => ({ ...item } as Card);
 
-const cardPayload = (data: Partial<Card>): Record<string, unknown> => ({
-  ...data,
-  api_config: data.api_config ? JSON.stringify(data.api_config) : '',
-});
+// Card items (卡密条目)
+
+const cardPayload = (data: Partial<Card>): Record<string, unknown> => ({ ...data });
 
 export const getCards = async (): Promise<Card[]> => {
   const res = await get<any>('/cards');
@@ -493,22 +482,122 @@ export const getCardDetails = async (cardId: string | number): Promise<any> => {
   return normalizeCard(card);
 };
 
-// 批量创建卡密组（上传表格）
-export const batchCreateCards = async (file: File): Promise<{
-  success: boolean;
-  total: number;
-  created: number;
+export interface CardBatchGroupRow {
+  name: string;
+  type?: CardKind;
+  card_id: number;
+  created: boolean;
+  added: number;
   failed: number;
-  rows: { row_no: number; success: boolean; id?: number; name: string; type?: string; error?: string }[];
-}> => {
+}
+
+export interface CardBatchResult {
+  success: boolean;
+  rows: number;
+  created: number;
+  appended: number;
+  items: number;
+  failed: number;
+  groups: CardBatchGroupRow[];
+  errors: { row_no: number; name?: string; error: string }[];
+}
+
+// 按卡种批量导入卡密：同名行并入同一卡种，已存在则追加。
+export const batchCreateCards = async (file: File): Promise<CardBatchResult> => {
   const body = new FormData();
   body.append('file', file);
   return postForm('/cards/batch', body);
 };
 
-// 往 data 类型卡密组批量追加卡密号
-export const appendCardData = async (cardId: string | number, content: string): Promise<{ success: boolean; added: number }> => {
-  return post(`/cards/${cardId}/append-data`, { content });
+// 往卡种添加卡密。批量卡密按行每条一张；固定文本/图片整段一条。
+export const addCardItems = async (
+  cardId: string | number,
+  content: string,
+): Promise<{ success: boolean; added: number; stock: CardStock }> => {
+  return post(`/cards/${cardId}/items`, { content });
+};
+
+// 卡密条目分页查询（支持状态/买家/订单/卡密关键字过滤）
+export interface CardItemQuery {
+  page?: number;
+  page_size?: number;
+  card_id?: number;
+  status?: CardItemStatus | '';
+  keyword?: string;
+  buyer_id?: string;
+  buyer_name?: string;
+  order_id?: string;
+}
+
+export const getCardItems = async (query: CardItemQuery = {}): Promise<CardItemPage> => {
+  return get<CardItemPage>('/cards/items', {
+    page: query.page ?? 1,
+    page_size: query.page_size ?? 20,
+    card_id: query.card_id || undefined,
+    status: query.status || undefined,
+    keyword: query.keyword?.trim() || undefined,
+    buyer_id: query.buyer_id?.trim() || undefined,
+    buyer_name: query.buyer_name?.trim() || undefined,
+    order_id: query.order_id?.trim() || undefined,
+  });
+};
+
+export const getCardItem = async (itemId: string | number): Promise<CardItem> => get<CardItem>(`/cards/items/${itemId}`);
+
+export const getCardStock = async (cardId: string | number): Promise<CardStock> => get(`/cards/${cardId}/stock`);
+
+// 批量出库（used）/回库（available）/作废（void）。
+export const bulkUpdateCardItems = async (ids: number[], status: CardItemStatus): Promise<{ success: boolean; updated: number }> => {
+  return put('/cards/items', { ids, status });
+};
+
+export type CardItemExportFormat = 'txt' | 'csv' | 'xlsx';
+
+// 导出卡密。传 ids 只导所选，否则按筛选条件导出。
+export const exportCardItems = async (
+  cardId: string | number,
+  payload: {
+    format: CardItemExportFormat;
+    ids?: number[];
+    status?: CardItemStatus | '';
+    keyword?: string;
+    buyer_id?: string;
+    buyer_name?: string;
+    order_id?: string;
+  },
+): Promise<Blob> => {
+  const res = await fetch(`/cards/${cardId}/items/export`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...payload,
+      status: payload.status || undefined,
+      keyword: payload.keyword?.trim() || undefined,
+      buyer_id: payload.buyer_id?.trim() || undefined,
+      buyer_name: payload.buyer_name?.trim() || undefined,
+      order_id: payload.order_id?.trim() || undefined,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let detail = text;
+    try { detail = JSON.parse(text)?.detail || text; } catch { /* 非 JSON 时直接用原文 */ }
+    throw new Error(detail || '导出失败');
+  }
+  return res.blob();
+};
+
+export const updateCardItem = async (itemId: string | number, data: { content?: string; status?: CardItemStatus }): Promise<CardItem> => {
+  return put(`/cards/items/${itemId}`, data);
+};
+
+export const deleteCardItems = async (ids: number[]): Promise<{ success: boolean; deleted: number }> => {
+  return del('/cards/items', { ids: ids.join(',') });
+};
+
+export const deleteCardItem = async (itemId: string | number): Promise<{ success: boolean; deleted: number }> => {
+  return del(`/cards/items/${itemId}`);
 };
 
 // Items

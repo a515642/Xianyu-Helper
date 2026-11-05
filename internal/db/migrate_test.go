@@ -30,7 +30,6 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"orders", "receiver_city"},
 		{"orders", "version"},
 		{"orders", "deleted_at"},
-		{"cards", "image_url"},
 		{"cards", "delay_seconds"},
 		{"keywords", "item_id"},
 		{"item_info", "multi_quantity_delivery"},
@@ -58,6 +57,7 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"risk_control_logs", "processing_status"},
 		{"risk_control_logs", "duration_ms"},
 		{"notification_outbox", "worker_token"},
+		{"cards", "kind"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {
@@ -129,8 +129,8 @@ func TestLatestMigrationsDownUpSQLite(t *testing.T) {
 	}
 	goose.SetBaseFS(migrationsFS)
 	// 依次回滚最新版本到 13，再整体升级。00029/00030 是聊天已读，
-	// 00034 是发货模板迁移，因此需要额外回滚三次才能到达原有的 migration 14 检查点。
-	for i := 0; i < 22; i++ {
+	// 00034 是发货模板迁移，00036 是卡密条目迁移，因此需要额外回滚四次才能到达原有的 migration 14 检查点。
+	for i := 0; i < 25; i++ {
 		if err := goose.Down(d, "migrations/sqlite"); err != nil {
 			t.Fatalf("down migration #%d: %v", i+1, err)
 		}
@@ -195,6 +195,62 @@ func TestLatestMigrationsDownUpSQLite(t *testing.T) {
 	var val string
 	if err := d.QueryRow(`SELECT value FROM system_settings WHERE key='renewal_log_retention_days'`).Scan(&val); err != nil || val != "10" {
 		t.Fatalf("renewal_log_retention_days after re-up: val=%q err=%v", val, err)
+	}
+}
+
+// TestMigrate_CardItemsBackfill 00036 迁移把历史 data_content 按行拆入 card_items 并删除原列。
+func TestMigrate_CardItemsBackfill(t *testing.T) {
+	ctx := context.Background()
+	d, _, err := Open(ctx, filepath.Join(t.TempDir(), "backfill.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	// 回滚到 00035，重建带 data_content 的历史结构。
+	if err := goose.DownTo(d, "migrations/sqlite", 35); err != nil {
+		t.Fatalf("DownTo 35: %v", err)
+	}
+	if !columnExists(t, d, "cards", "data_content") {
+		t.Fatal("回滚后应恢复 cards.data_content")
+	}
+	if _, err := d.Exec(`INSERT INTO users (id,username,email,password_hash,is_admin,is_active) VALUES (1,'backfill-admin','b@example.com','x',1,1)`); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	res, err := d.Exec(`INSERT INTO cards (name,type,data_content,enabled,user_id) VALUES (?,?,?,?,?)`, "历史卡组", "data", "line1\n\nline2\r\nline3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, _ := res.LastInsertId()
+
+	if err := goose.Up(d, "migrations/sqlite"); err != nil {
+		t.Fatalf("re-up: %v", err)
+	}
+	if columnExists(t, d, "cards", "data_content") {
+		t.Fatal("data_content 应在 00036 后删除")
+	}
+	rows, err := d.Query(`SELECT content,status FROM card_items WHERE card_id=? ORDER BY id`, cardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var contents []string
+	for rows.Next() {
+		var content, status string
+		if err := rows.Scan(&content, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "available" {
+			t.Fatalf("回填条目应为可用，got %q", status)
+		}
+		contents = append(contents, content)
+	}
+	if len(contents) != 3 || contents[0] != "line1" || contents[1] != "line2" || contents[2] != "line3" {
+		t.Fatalf("回填内容异常: %#v", contents)
 	}
 }
 

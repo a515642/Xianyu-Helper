@@ -131,7 +131,7 @@ func TestAdminStatsWithOrders(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	store.DB.ExecContext(ctx, `INSERT INTO orders (order_id, item_id, cookie_id, order_status) VALUES ('s1','i1','acc1','2')`)
-	store.DB.ExecContext(ctx, `INSERT INTO cards (name, type, user_id) VALUES ('卡1','text',1)`)
+	store.DB.ExecContext(ctx, `INSERT INTO cards (name, user_id) VALUES ('卡1',1)`)
 	h := srv.Router()
 	cookie := loginHelper(t, h)
 

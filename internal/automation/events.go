@@ -39,6 +39,7 @@ type Task struct {
 	OrderID     string
 	ItemID      string
 	BuyerID     string
+	BuyerName   string
 	SpecName    string
 	SpecValue   string
 	Quantity    string

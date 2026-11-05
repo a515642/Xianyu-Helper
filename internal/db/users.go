@@ -270,3 +270,6 @@ func (u *Users) scanUser(ctx context.Context, query string, args ...any) (*User,
 	usr.IsAdmin = isAdmin != 0
 	return &usr, nil
 }
+
+// ErrCardStockEmpty 表示卡密组已无可用库存，发货调用方据此区分"缺货"与数据库错误。
+var ErrCardStockEmpty = errors.New("卡密库存不足")

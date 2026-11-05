@@ -21,24 +21,6 @@ type ItemInfo struct {
 	MultiQuantityDelivery bool
 }
 
-// Card 对应 cards 表（发货用字段）。
-type Card struct {
-	ID           int64
-	Name         string
-	Type         string // api/text/data/image
-	APIConfig    string // JSON
-	TextContent  string
-	DataContent  string
-	ImageURL     string
-	Description  string
-	Enabled      bool
-	DelaySeconds int
-	IsMultiSpec  bool
-	SpecName     string
-	SpecValue    string
-	UserID       int64
-}
-
 // Items 商品信息操作。
 type Items struct {
 	DB      *sql.DB
@@ -92,160 +74,74 @@ func (i *Items) MultiQuantityDelivery(ctx context.Context, cookieID, itemID stri
 	return v != 0
 }
 
-// Cards 卡券操作。
+// Cards 卡券操作。库存以 card_items 逐条记录维护，不再使用卡片级多行文本。
 type Cards struct {
 	DB      *sql.DB
 	Dialect Dialect
 }
 
-// ConsumeBatchData 原子预留一条批量数据卡券（data 类型），返回内容。
-// 通过快照条件更新处理并发追加/消费；调用方发送失败时应调用 RestoreBatchData。
-func (c *Cards) ConsumeBatchData(ctx context.Context, cardID int64) (string, error) {
-	for attempts := 0; attempts < 20; attempts++ {
-		var dataContent sql.NullString
-		err := c.DB.QueryRowContext(ctx, `SELECT data_content FROM cards WHERE id=?`, cardID).Scan(&dataContent)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return "", ErrNotFound
-			}
-			return "", err
-		}
-		if !dataContent.Valid || dataContent.String == "" {
-			return "", errors.New("卡券批量数据为空")
-		}
-		lines := splitLines(dataContent.String)
-		if len(lines) == 0 {
-			return "", errors.New("卡券批量数据无有效行")
-		}
-		remaining := ""
-		if len(lines) > 1 {
-			remaining = joinLines(lines[1:])
-		}
-		res, err := c.DB.ExecContext(ctx,
-			`UPDATE cards SET data_content=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND data_content=?`,
-			remaining, cardID, dataContent.String)
-		if err != nil {
-			return "", err
-		}
-		if affected, err := res.RowsAffected(); err == nil && affected == 1 {
-			return lines[0], nil
-		}
-	}
-	return "", errors.New("卡券库存并发修改过于频繁，请稍后重试")
+// CardItemMeta 描述一次发货预留要写回的售出归属。
+type CardItemMeta struct {
+	BuyerID   string
+	BuyerName string
+	OrderID   string
+	SpecName  string
+	SpecValue string
+	Quantity  int
 }
 
-// RestoreBatchData 把发送失败的预留卡密放回库存头部。恢复失败时宁可进入人工处理，
-// 也不能把一个已成功发送但响应不确定的卡密自动重复发给下一位买家。
-func (c *Cards) RestoreBatchData(ctx context.Context, cardID int64, content string) error {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return errors.New("恢复卡密内容为空")
+// ReserveDataItem 原子预留一条可用卡密（data 类型），返回条目 ID 和内容。
+// 发送确定失败时应调用 ReleaseDataItem 归还；发送结果不确定时保留已用状态供人工核对。
+func (c *Cards) ReserveDataItem(ctx context.Context, cardID int64, meta CardItemMeta) (int64, string, error) {
+	quantity := meta.Quantity
+	if quantity <= 0 {
+		quantity = 1
 	}
 	for attempts := 0; attempts < 20; attempts++ {
-		var current sql.NullString
-		if err := c.DB.QueryRowContext(ctx, `SELECT data_content FROM cards WHERE id=?`, cardID).Scan(&current); err != nil {
+		var itemID int64
+		var content string
+		err := c.DB.QueryRowContext(ctx,
+			`SELECT id, content FROM card_items WHERE card_id=? AND status='available' ORDER BY id LIMIT 1`,
+			cardID).Scan(&itemID, &content)
+		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return ErrNotFound
+				return 0, "", ErrCardStockEmpty
 			}
-			return err
-		}
-		merged := content
-		if current.Valid && strings.TrimSpace(current.String) != "" {
-			merged += "\n" + current.String
+			return 0, "", err
 		}
 		res, err := c.DB.ExecContext(ctx,
-			`UPDATE cards SET data_content=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND COALESCE(data_content,'')=?`,
-			merged, cardID, current.String)
+			`UPDATE card_items SET status='used',buyer_id=?,buyer_name=?,order_id=?,spec_name=?,spec_value=?,
+			        quantity=?,sold_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+			 WHERE id=? AND status='available'`,
+			nullable(meta.BuyerID), nullable(meta.BuyerName), nullable(meta.OrderID),
+			nullable(meta.SpecName), nullable(meta.SpecValue), quantity, itemID)
 		if err != nil {
-			return err
+			return 0, "", err
 		}
 		if affected, err := res.RowsAffected(); err == nil && affected == 1 {
-			return nil
+			return itemID, content, nil
 		}
 	}
-	return errors.New("恢复卡密时库存并发修改过于频繁")
+	return 0, "", errors.New("卡密库存并发修改过于频繁，请稍后重试")
 }
 
-// FirstBatchData 返回 data 类型卡券当前第一条有效内容和原始快照。
-// 调用方发送成功后应调用 CommitFirstBatchData 删除同一快照中的第一条，避免发送失败丢卡。
-func (c *Cards) FirstBatchData(ctx context.Context, cardID int64) (content, snapshot string, err error) {
-	var dataContent sql.NullString
-	err = c.DB.QueryRowContext(ctx, `SELECT data_content FROM cards WHERE id=?`, cardID).Scan(&dataContent)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", ErrNotFound
-		}
-		return "", "", err
+// ReleaseDataItem 把发送失败的预留卡密恢复为可用并清空售出归属。
+func (c *Cards) ReleaseDataItem(ctx context.Context, itemID int64) error {
+	if itemID <= 0 {
+		return errors.New("恢复卡密缺少条目ID")
 	}
-	if !dataContent.Valid || dataContent.String == "" {
-		return "", "", errors.New("卡券批量数据为空")
-	}
-	lines := splitLines(dataContent.String)
-	if len(lines) == 0 {
-		return "", "", errors.New("卡券批量数据无有效行")
-	}
-	return lines[0], dataContent.String, nil
-}
-
-// CommitFirstBatchData 在 data_content 仍等于 snapshot 时删除第一条有效内容。
-// 条件更新失败表示库存被并发修改，调用方应停止本次发货，避免错删卡密。
-func (c *Cards) CommitFirstBatchData(ctx context.Context, cardID int64, snapshot string) error {
-	lines := splitLines(snapshot)
-	if len(lines) == 0 {
-		return errors.New("卡券批量数据无有效行")
-	}
-	remaining := ""
-	if len(lines) > 1 {
-		remaining = joinLines(lines[1:])
-	}
-	res, err := c.DB.ExecContext(ctx, `UPDATE cards SET data_content=? WHERE id=? AND data_content=?`, remaining, cardID, snapshot)
+	res, err := c.DB.ExecContext(ctx,
+		`UPDATE card_items SET status='available',buyer_id=NULL,buyer_name=NULL,order_id=NULL,
+		        spec_name=NULL,spec_value=NULL,quantity=1,sold_at=NULL,updated_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND status='used'`, itemID)
 	if err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err == nil && n == 0 {
-		return errors.New("卡券库存已被并发修改，请重试")
+	affected, err := res.RowsAffected()
+	if err == nil && affected == 0 {
+		return errors.New("卡密条目不可归还或已被修改")
 	}
 	return nil
-}
-
-// AppendBatchData 往 data 类型卡密组追加卡密号（按行）。返回新增的有效（非空）行数。
-// 已有 data_content 非空时在末尾换行追加，否则直接写入。
-func (c *Cards) AppendBatchData(ctx context.Context, cardID int64, content string) (int, error) {
-	lines := splitLines(content)
-	valid := 0
-	for _, l := range lines {
-		if strings.TrimSpace(l) != "" {
-			valid++
-		}
-	}
-	if valid == 0 {
-		return 0, errors.New("无有效卡密行")
-	}
-	for attempts := 0; attempts < 20; attempts++ {
-		var existing sql.NullString
-		err := c.DB.QueryRowContext(ctx, `SELECT data_content FROM cards WHERE id=?`, cardID).Scan(&existing)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return 0, ErrNotFound
-			}
-			return 0, err
-		}
-		merged := content
-		if existing.Valid && existing.String != "" {
-			merged = existing.String + "\n" + content
-		}
-		res, err := c.DB.ExecContext(ctx,
-			`UPDATE cards SET data_content=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND COALESCE(data_content,'')=?`,
-			merged, cardID, existing.String)
-		if err != nil {
-			return 0, err
-		}
-		if affected, err := res.RowsAffected(); err == nil && affected == 1 {
-			return valid, nil
-		}
-	}
-	return 0, errors.New("追加卡密时库存并发修改过于频繁")
 }
 
 // splitLines / joinLines 统一处理多行库存内容。

@@ -49,14 +49,30 @@ func TestAddKeywordWithItemID(t *testing.T) {
 	}
 }
 
-// TestBatchCreateCards CSV 批量建卡密组。
+// TestBatchCreateCards 按卡种批量导入：同名行并入同一卡种，已存在则追加。
 func TestBatchCreateCards(t *testing.T) {
-	srv, _, cleanup := newTestServer(t)
+	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
+	ctx := context.Background()
+	admin, _ := store.Users.GetByUsername(ctx, "admin")
+
+	// 预置一个已存在的批量卡种，导入应追加而不是新建。
+	existingID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "已存在批量卡", Kind: db.CardKindCard, Enabled: true, UserID: admin.ID})
+	store.Cards.AddItems(ctx, existingID, "OLD-1")
+
 	h := srv.Router()
 	cookie := loginHelper(t, h)
 
-	csv := "name,type,content,delay_seconds\n卡A,text,内容A,0\n卡B,text,内容B,5\nAPI卡,api,https://example.com,0\n延时异常,text,内容,-1\n"
+	// 同名行（卡A）合并为一个卡种；已存在的卡种追加；类型冲突与非法延时的行计入 failed。
+	csv := "卡种,类型,内容,描述,延迟秒\n" +
+		"卡A,card,K1,新卡种描述,0\n" +
+		"卡A,card,K2,,\n" +
+		"卡A,card,K3,,\n" +
+		"已存在批量卡,card,NEW-1,,\n" +
+		"已存在批量卡,card,NEW-2,,\n" +
+		"延时异常,card,X,,9999\n" +
+		"卡A,text,混入类型,,\n" +
+		"只建卡种,,,,0\n"
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
 	fw, _ := mw.CreateFormFile("file", "cards.csv")
@@ -71,13 +87,50 @@ func TestBatchCreateCards(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("batch status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var res map[string]any
-	json.Unmarshal(rec.Body.Bytes(), &res)
-	if res["created"].(float64) != 2 {
-		t.Fatalf("应创建 2 个，got %+v", res)
+	var res struct {
+		Rows     int `json:"rows"`
+		Created  int `json:"created"`
+		Appended int `json:"appended"`
+		Items    int `json:"items"`
+		Failed   int `json:"failed"`
+		Groups   []struct {
+			Name    string `json:"name"`
+			Type    string `json:"type"`
+			CardID  int64  `json:"card_id"`
+			Created bool   `json:"created"`
+			Added   int    `json:"added"`
+		} `json:"groups"`
 	}
-	if res["failed"].(float64) != 2 {
-		t.Fatalf("API 卡和非法延时应拒绝，got %+v", res)
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows != 8 || res.Created != 2 || res.Appended != 1 || res.Items != 5 || res.Failed != 2 {
+		t.Fatalf("汇总异常: %+v", res)
+	}
+
+	addedByName := map[string]int{}
+	for _, group := range res.Groups {
+		addedByName[group.Name] = group.Added
+	}
+	if addedByName["卡A"] != 3 {
+		t.Fatalf("卡A 应写入 3 条, got %+v", res.Groups)
+	}
+	if addedByName["已存在批量卡"] != 2 {
+		t.Fatalf("已存在卡种应追加 2 条, got %+v", res.Groups)
+	}
+
+	// 校验落库结果。
+	created, err := store.Cards.FindByName(ctx, admin.ID, "卡A")
+	if err != nil || created.Kind != db.CardKindCard || created.ItemCount != 3 {
+		t.Fatalf("卡A 落库异常: %+v err=%v", created, err)
+	}
+	existing, _ := store.Cards.FindByName(ctx, admin.ID, "已存在批量卡")
+	if existing.ID != existingID || existing.ItemCount != 3 {
+		t.Fatalf("已存在卡种应保留 ID 并变为 3 条: %+v", existing)
+	}
+	empty, err := store.Cards.FindByName(ctx, admin.ID, "只建卡种")
+	if err != nil || empty.ItemCount != 0 {
+		t.Fatalf("只建卡种应为空卡种: %+v err=%v", empty, err)
 	}
 
 	// 缺文件 → 400。
@@ -88,57 +141,6 @@ func TestBatchCreateCards(t *testing.T) {
 	h.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusBadRequest {
 		t.Fatalf("缺文件应 400，got %d", rec2.Code)
-	}
-}
-
-// TestAppendCardData 追加批量卡密号 + 校验分支。
-func TestAppendCardData(t *testing.T) {
-	srv, store, cleanup := newTestServer(t)
-	defer cleanup()
-	ctx := context.Background()
-	admin, _ := store.Users.GetByUsername(ctx, "admin")
-	// 建一个 data 类型卡密组。
-	id, _ := store.Cards.Create(ctx, &db.CardFull{Name: "批量卡", Type: "data", DataContent: "K1\nK2", Enabled: true, UserID: admin.ID})
-
-	h := srv.Router()
-	cookie := loginHelper(t, h)
-
-	// 追加。
-	body := `{"content":"K3\nK4"}`
-	req := httptest.NewRequest(http.MethodPost, "/cards/"+itoa(id)+"/append-data", strings.NewReader(body))
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("append status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	// 空 content → 400。
-	req2 := httptest.NewRequest(http.MethodPost, "/cards/"+itoa(id)+"/append-data", strings.NewReader(`{"content":""}`))
-	req2.AddCookie(cookie)
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusBadRequest {
-		t.Fatalf("空 content 应 400，got %d", rec2.Code)
-	}
-
-	// 无效 card_id → 400。
-	req3 := httptest.NewRequest(http.MethodPost, "/cards/abc/append-data", strings.NewReader(`{"content":"x"}`))
-	req3.AddCookie(cookie)
-	rec3 := httptest.NewRecorder()
-	h.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusBadRequest {
-		t.Fatalf("无效 ID 应 400，got %d", rec3.Code)
-	}
-
-	// 非 data 类型卡密组追加 → 400。建一个 text 类型。
-	textID, _ := store.Cards.Create(ctx, &db.CardFull{Name: "文本卡", Type: "text", TextContent: "T", Enabled: true, UserID: admin.ID})
-	req4 := httptest.NewRequest(http.MethodPost, "/cards/"+itoa(textID)+"/append-data", strings.NewReader(`{"content":"x"}`))
-	req4.AddCookie(cookie)
-	rec4 := httptest.NewRecorder()
-	h.ServeHTTP(rec4, req4)
-	if rec4.Code != http.StatusBadRequest {
-		t.Fatalf("非 data 类型应 400，got %d", rec4.Code)
 	}
 }
 

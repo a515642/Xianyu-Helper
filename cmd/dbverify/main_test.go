@@ -108,7 +108,8 @@ func TestCleanupVerifyDataRemovesRowsAndVerifyDataIsDisabled(t *testing.T) {
 	if err := store.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: ids.accountID, ItemID: ids.itemID, ItemTitle: "测试商品"}); err != nil {
 		t.Fatalf("Items.Upsert: %v", err)
 	}
-	cardID, err := store.Cards.Create(ctx, &db.CardFull{Name: "测试卡组", Type: "data", DataContent: "card", Enabled: true, UserID: user.ID})
+	cardID, err := store.Cards.Create(ctx, &db.CardFull{Name: "测试卡种", Enabled: true, UserID: user.ID})
+	store.Cards.AddItems(ctx, cardID, "card")
 	if err != nil || cardID == 0 {
 		t.Fatalf("Cards.Create: id=%d err=%v", cardID, err)
 	}

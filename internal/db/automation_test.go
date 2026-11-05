@@ -28,7 +28,7 @@ func TestAutomation_ListForUserAndActions(t *testing.T) {
 	uid, cid := seedAccount(t, s)
 
 	// 建一张卡券，动作里引用它。
-	cardID, _ := s.Cards.Create(ctx, &CardFull{Name: "卡密", Type: "text", TextContent: "C", Enabled: true, UserID: uid})
+	cardID, _ := s.Cards.Create(ctx, &CardFull{Name: "卡密", Enabled: true, UserID: uid})
 
 	ruleID, err := s.Automation.Create(ctx, makeAutomationRule(cid, uid, "i1", "paid", true, 100,
 		AutomationActionInput{ActionType: "send_card", CardID: cardID, DeliveryCount: 2, Enabled: true, SortOrder: 1},

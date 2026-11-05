@@ -11,13 +11,23 @@ import (
 	"xianyu-go/internal/db"
 )
 
-// mountCardsReal 卡券 CRUD（真实实现）。发货规则已统一到 automation_rules。
+// mountCardsReal 卡种与卡密条目（真实实现）。发货规则已统一到 automation_rules。
 func (s *Server) mountCardsReal(r chi.Router) {
+	// 卡种管理。
 	r.Get("/cards", s.listCards)
 	r.Post("/cards", s.createCard)
 	r.Post("/cards/batch", s.batchCreateCards)
-	r.Post("/cards/{card_id}/append-data", s.appendCardData)
+	r.Post("/cards/{card_id}/items", s.addCardItems)
 	r.Get("/cards/{card_id}/details", s.getCard)
+	r.Get("/cards/{card_id}/stock", s.cardStock)
+	// 卡密条目（逐条状态管理）。静态段需先于 {card_id} 注册，避免被当作组 ID。
+	r.Get("/cards/items", s.listCardItems)
+	r.Post("/cards/{card_id}/items/export", s.exportCardItems)
+	r.Put("/cards/items", s.bulkUpdateCardItems)
+	r.Delete("/cards/items", s.deleteCardItems)
+	r.Get("/cards/items/{item_id}", s.getCardItem)
+	r.Put("/cards/items/{item_id}", s.updateCardItem)
+	r.Delete("/cards/items/{item_id}", s.deleteCardItem)
 	r.Get("/cards/{card_id}", s.getCard)
 	r.Put("/cards/{card_id}", s.updateCard)
 	r.Delete("/cards/{card_id}", s.deleteCard)
@@ -59,10 +69,6 @@ func (s *Server) createCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cf.UserID = sess.UserID
-	if cf.Type == "api" {
-		writeErr(w, http.StatusBadRequest, "API 卡密暂不支持自动发货，不能新建")
-		return
-	}
 	id, err := s.Store.Cards.Create(r.Context(), cf)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "创建失败")
@@ -84,10 +90,6 @@ func (s *Server) updateCard(w http.ResponseWriter, r *http.Request) {
 	}
 	existing, ok := s.requireCardOwner(w, r, id)
 	if !ok {
-		return
-	}
-	if cf.Type == "api" && existing.Type != "api" {
-		writeErr(w, http.StatusBadRequest, "API 卡密暂不支持自动发货，不能转换为该类型")
 		return
 	}
 	cf.ID = id
@@ -118,11 +120,7 @@ func (s *Server) deleteCard(w http.ResponseWriter, r *http.Request) {
 func decodeCard(r *http.Request) (*db.CardFull, error) {
 	var req struct {
 		Name         string `json:"name"`
-		Type         string `json:"type"`
-		APIConfig    string `json:"api_config"`
-		TextContent  string `json:"text_content"`
-		DataContent  string `json:"data_content"`
-		ImageURL     string `json:"image_url"`
+		Kind         string `json:"kind"`
 		Description  string `json:"description"`
 		Enabled      bool   `json:"enabled"`
 		DelaySeconds int    `json:"delay_seconds"`
@@ -133,34 +131,21 @@ func decodeCard(r *http.Request) (*db.CardFull, error) {
 	if err := decodeJSON(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Name == "" || req.Type == "" {
-		return nil, errStr("名称和类型不能为空")
+	if strings.TrimSpace(req.Name) == "" {
+		return nil, errStr("卡种名称不能为空")
 	}
-	switch req.Type {
-	case "text", "data", "image", "api":
-	default:
-		return nil, errStr("类型必须为 text、data、image 或 api")
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	if kind == "" {
+		kind = db.CardKindCard
+	}
+	if !db.ValidCardKind(kind) {
+		return nil, errStr("卡密类型必须为 card、text 或 image")
 	}
 	if req.DelaySeconds < 0 || req.DelaySeconds > 3600 {
 		return nil, errStr("延时发货必须在 0 到 3600 秒之间")
 	}
-	switch req.Type {
-	case "text":
-		if strings.TrimSpace(req.TextContent) == "" {
-			return nil, errStr("文本卡密内容不能为空")
-		}
-	case "data":
-		if strings.TrimSpace(req.DataContent) == "" {
-			return nil, errStr("数据卡密内容不能为空")
-		}
-	case "image":
-		if strings.TrimSpace(req.ImageURL) == "" {
-			return nil, errStr("图片卡密 URL 不能为空")
-		}
-	}
 	return &db.CardFull{
-		Name: req.Name, Type: req.Type, APIConfig: req.APIConfig, TextContent: req.TextContent,
-		DataContent: req.DataContent, ImageURL: req.ImageURL, Description: req.Description,
+		Name: strings.TrimSpace(req.Name), Kind: kind, Description: req.Description,
 		Enabled: req.Enabled, DelaySeconds: req.DelaySeconds, IsMultiSpec: req.IsMultiSpec,
 		SpecName: req.SpecName, SpecValue: req.SpecValue,
 	}, nil
