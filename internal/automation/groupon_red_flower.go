@@ -183,7 +183,7 @@ func (c *Center) runRedFlower(ctx context.Context, settings db.AccountTaskSettin
 			}
 			_ = c.store.AccountTasks.FinishRun(ctx, runKey, "failed", 0, 1, message, time.Now().UTC().Add(10*time.Minute).Unix())
 			summary.Failed++
-			if mtop.IsSessionExpiredErr(requestErr) {
+			if isPlatformBlockErr(requestErr) {
 				return summary, requestErr
 			}
 			continue

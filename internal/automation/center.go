@@ -182,6 +182,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		if err := c.deferTask(ctx, task, until); err != nil {
 			return false, err
 		}
+		c.audit().queued(ctx, task, 0, 0, "账号已暂停，等待恢复后执行")
 		c.logger.Info("账号已暂停，自动化事件已持久化等待恢复", "account", task.AccountID, "trigger", task.TriggerType, "due_at", until)
 		return true, nil
 	}
@@ -190,6 +191,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		return false, err
 	}
 	if !enabled {
+		c.audit().skipped(ctx, task, "账号已停用")
 		c.logger.Info("账号已停用，记录事件事实但不执行自动化", "account", task.AccountID, "trigger", task.TriggerType)
 		return false, nil
 	}
@@ -222,6 +224,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		}
 	}
 	if len(rules) == 0 {
+		c.audit().skipped(ctx, task, "没有匹配的自动化规则")
 		c.logger.Info("无匹配自动化规则，忽略事件", "trigger", task.TriggerType, "order_id", task.OrderID, "item_id", task.ItemID)
 		return false, nil
 	}
@@ -234,6 +237,7 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 				if deferErr := c.deferTaskWithError(ctx, task, dueAt, prepErr.Error()); deferErr != nil {
 					return false, errors.Join(err, fmt.Errorf("持久化前置失败任务: %w", deferErr))
 				}
+				c.audit().queued(ctx, task, 0, rule.ID, "前置处理失败，等待自动重试")
 				c.logger.Warn("自动化前置处理失败，任务已持久化等待恢复", "account", task.AccountID,
 					"order_id", task.OrderID, "trigger", task.TriggerType, "retry_at", dueAt, "err", err)
 				return true, nil
@@ -242,6 +246,12 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 				return true, nil
 			}
 			c.logger.Error("自动化规则执行失败", "rule_id", rule.ID, "trigger", task.TriggerType, "err", err)
+			if isPlatformBlockErr(err) {
+				// 风控或会话失效时同账号的其余规则不得继续请求平台，交给下一轮冷却后再试。
+				c.logger.Warn("自动化执行遇到平台阻断，停止该事件剩余规则", "account", task.AccountID,
+					"order_id", task.OrderID, "trigger", task.TriggerType, "rule_id", rule.ID)
+				return false, err
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -442,6 +452,12 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 	if err != nil {
 		return &preparationError{err: err}
 	}
+	// 付款自动发货必须有正数成交金额；服务预约单等 ¥0 订单不能发卡密。
+	if task.TriggerType == TriggerOrderPaid && task.OrderID != "" {
+		if reason := c.paidAmountBlockedReason(task.Amount); reason != "" {
+			return c.skipPaidRunForBlockedAmount(ctx, task, reason)
+		}
+	}
 	triggerKey := buildTriggerKey(task)
 	if triggerKey == "" {
 		return nil
@@ -453,6 +469,7 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 	retryTask.CookieStr = ""
 	rawJSON, _ := json.Marshal(retryTask)
 	var run *db.AutomationRun
+	createdRun := false
 	if resumeID := taskAutomationRunID(task); resumeID > 0 {
 		run, err = c.store.Automation.GetRun(ctx, resumeID)
 		if err != nil {
@@ -477,6 +494,10 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 		if err != nil {
 			return err
 		}
+		createdRun = true
+	}
+	if createdRun {
+		c.audit().runStarted(ctx, task, rule.ID, run.ID)
 	}
 	status := "success"
 	errMsg := ""
@@ -491,6 +512,7 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 			c.logger.Error("保存自动化执行结果失败", "run_id", run.ID, "err", finishErr)
 		}
 		cancel()
+		c.audit().runFinished(ctx, task, rule.ID, run.ID, status, sent, errMsg)
 		if c.notifier != nil {
 			c.notifyResult(task, status, sent, errMsg)
 		}
@@ -597,6 +619,7 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				if err := c.deferTask(ctx, task, dueAt.Unix()); err != nil {
 					return sent, false, err
 				}
+				c.audit().queued(ctx, task, run.ID, ruleID, fmt.Sprintf("动作延迟 %d 秒后执行", delaySeconds))
 				return sent, true, nil
 			}
 		}
@@ -616,6 +639,7 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 					c.logger.Error("保存不确定动作人工核对状态失败", "run_id", run.ID, "err", quarantineErr)
 					return sent + n, false, errors.Join(errAutomationNeedsReview, errAutomationQuarantine, actionErr, quarantineErr)
 				}
+				c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, actionErr.Error())
 				return sent + n, false, fmt.Errorf("%w: %v", errAutomationNeedsReview, actionErr)
 			}
 			if abortErr := c.store.Automation.AbortRunAction(ctx, run.ID, run.AttemptCount, cursor); abortErr != nil {
@@ -623,8 +647,10 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				if quarantineErr := c.store.Automation.QuarantineRun(ctx, run.ID, run.AttemptCount, reason); quarantineErr != nil {
 					c.logger.Error("隔离动作状态异常的自动化运行失败", "run_id", run.ID, "err", quarantineErr)
 				}
+				c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, reason)
 				return sent, false, fmt.Errorf("%w: %s", errAutomationNeedsReview, reason)
 			}
+			c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusFailed, actionErr.Error())
 			return sent, false, actionErr
 		}
 		if err := c.store.Automation.AdvanceRunAction(ctx, run.ID, run.AttemptCount, cursor, n); err != nil {
@@ -632,8 +658,10 @@ func (c *Center) executeRunActions(ctx context.Context, task Task, ruleID int64,
 				c.logger.Error("保存检查点异常的人工核对状态失败", "run_id", run.ID, "err", quarantineErr)
 				return sent + n, false, errors.Join(errAutomationNeedsReview, errAutomationQuarantine, err, quarantineErr)
 			}
+			c.audit().actionFailed(ctx, task, ruleID, run.ID, action, db.AuditStatusNeedsReview, "动作已执行但检查点保存失败")
 			return sent + n, false, fmt.Errorf("%w: %v", errAutomationNeedsReview, err)
 		}
+		c.audit().actionSucceeded(ctx, task, ruleID, run.ID, action, n)
 		sent += n
 		if task.Raw != nil {
 			delete(task.Raw, "automation_delay_cursor")
@@ -730,18 +758,12 @@ func (c *Center) prepareTask(ctx context.Context, task Task) (Task, error) {
 		BuyerID:  task.BuyerID,
 		ChatID:   task.ChatID,
 	})
-	needsDetail := task.TriggerType == TriggerOrderPaid
 	if existing, err := c.store.Orders.Get(ctx, task.OrderID); err == nil && existing != nil {
 		task = mergeOrderIntoTask(task, existing)
-		if needsDetail && (existing.Quantity == "" || existing.Amount == "") {
-			needsDetail = true
-		}
-		// 规则是否多规格由 action.config_json 决定；这里无法提前知道命中的 action，
-		// 因此交易类事件统一补齐规格，确保后续规格映射有事实依据。
-		if needsDetail && (existing.SpecName == "" || existing.SpecValue == "") {
-			needsDetail = true
-		}
 	}
+	// 付款发货所需的本地事实齐全时不再请求平台订单详情，减少付款事件和续跑对平台的请求；
+	// 缺少数量、金额或规格时必须补齐，不能按部分事实猜测发货。
+	needsDetail := task.TriggerType == TriggerOrderPaid && !paidOrderFactsComplete(task)
 	if !needsDetail || c.fetcher == nil {
 		return task, nil
 	}
@@ -789,6 +811,13 @@ func (c *Center) prepareTask(ctx context.Context, task Task) (Task, error) {
 	return task, nil
 }
 
+// paidOrderFactsComplete 判断付款发货所需的本地订单事实是否齐全：可靠的正整数数量、
+// 金额和完整规格组合（规格名与规格值）。任一缺失都必须向平台补齐。
+func paidOrderFactsComplete(task Task) bool {
+	return parsePositiveInt(task.Quantity) > 0 && strings.TrimSpace(task.Amount) != "" &&
+		strings.TrimSpace(task.SpecName) != "" && strings.TrimSpace(task.SpecValue) != ""
+}
+
 func mergeOrderIntoTask(task Task, order *db.Order) Task {
 	if task.ItemID == "" {
 		task.ItemID = order.ItemID
@@ -815,6 +844,72 @@ func mergeOrderIntoTask(task Task, order *db.Order) Task {
 		task.OrderStatus = order.OrderStatus
 	}
 	return task
+}
+
+// 付款自动发货的成交金额门禁。金额无法证明为严格正数时不得发卡密、确认发货或触发人工告警。
+const (
+	reasonOrderAmountNotPositive = "order_amount_not_positive"
+	reasonOrderAmountMissing     = "order_amount_missing"
+)
+
+// paidAmountBlockedReason 返回空字符串表示允许自动发货；否则返回拦截原因。
+// raw 是订单事实中的金额文本（可带 ¥ 前缀与千位分隔符）。
+func (c *Center) paidAmountBlockedReason(raw string) string {
+	normalized, valid := db.NormalizeOrderAmount(raw)
+	if !valid {
+		return reasonOrderAmountNotPositive
+	}
+	if normalized == "" {
+		// 没有详情查询器时无法补全金额，保持原有行为；有查询器却补全后仍缺失，则按无法证明为正数处理。
+		if c.fetcher == nil {
+			return ""
+		}
+		return reasonOrderAmountMissing
+	}
+	// 逐字符检查是否含 1-9 的有效数字；全为 0 与小数点即为零金额。
+	for _, digit := range normalized {
+		if digit >= '1' && digit <= '9' {
+			return ""
+		}
+	}
+	return reasonOrderAmountNotPositive
+}
+
+// skipPaidRunForBlockedAmount 在金额门禁命中时收口付款任务：
+// 新事件直接跳过；零进度运行取消；已有发送进度的运行转人工核对并保留发送计数。
+func (c *Center) skipPaidRunForBlockedAmount(ctx context.Context, task Task, reason string) error {
+	resumeID := taskAutomationRunID(task)
+	if resumeID <= 0 {
+		c.audit().skipped(ctx, task, "订单金额不是正数："+reason)
+		c.logger.Info("订单金额不是正数，跳过付款自动发货", "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
+		return nil
+	}
+	run, err := c.store.Automation.GetRun(ctx, resumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if run.Status != "running" {
+		return nil
+	}
+	if run.SentCount == 0 && run.ActionCursor == 0 && !run.ActionStarted {
+		cancelReason := "订单金额不是正数（" + reason + "），不自动发货"
+		if err := c.store.Automation.FinishRun(ctx, run.ID, run.AttemptCount, "canceled", 0, cancelReason); err != nil {
+			return fmt.Errorf("取消零金额付款运行: %w", err)
+		}
+		c.audit().runFinished(ctx, task, run.RuleID, run.ID, db.AuditStatusCanceled, 0, cancelReason)
+		c.logger.Info("订单金额不是正数，取消尚未执行动作的付款运行", "run_id", run.ID, "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
+		return nil
+	}
+	reasonText := "订单金额不是正数（" + reason + "），付款发货已有进度，已停止自动重放，请人工核对"
+	if err := c.store.Automation.QuarantineRunResult(ctx, run.ID, run.AttemptCount, run.SentCount, reasonText); err != nil {
+		return fmt.Errorf("保存零金额付款运行人工核对状态: %w", err)
+	}
+	c.audit().runFinished(ctx, task, run.RuleID, run.ID, db.AuditStatusNeedsReview, run.SentCount, reasonText)
+	c.notifyRunNeedsReview(*run, reasonText)
+	return nil
 }
 
 func (c *Center) executeAction(ctx context.Context, task Task, action db.AutomationAction) (int, error) {
@@ -1118,6 +1213,11 @@ func (c *Center) sendTemplate(ctx context.Context, task Task, action db.Automati
 		}
 		sent++
 	}
+	for _, entry := range reserved {
+		if markErr := c.store.Cards.MarkDataItemSold(ctx, entry.itemID); markErr != nil {
+			c.logger.Warn("标记卡密售出台账失败", "card_item_id", entry.itemID, "err", markErr)
+		}
+	}
 	return sent, nil
 }
 
@@ -1146,8 +1246,11 @@ func (c *Center) sendDataCard(ctx context.Context, task Task, card *db.CardFull,
 					}
 					return sent, err
 				}
-				// 请求已经交给传输层后无法判断远端是否收到，保留已用状态并人工核对。
+				// 请求已经交给传输层后无法判断远端是否收到，保留待核对台账并人工核对。
 				return sent, uncertainAction(err)
+			}
+			if markErr := c.store.Cards.MarkDataItemSold(ctx, itemID); markErr != nil {
+				c.logger.Warn("标记卡密售出台账失败", "card_item_id", itemID, "err", markErr)
 			}
 		}
 		sent++
@@ -1167,9 +1270,12 @@ func (c *Center) cardItemMeta(task Task) db.CardItemMeta {
 		BuyerID:   task.BuyerID,
 		BuyerName: buyerName,
 		OrderID:   task.OrderID,
+		ItemID:    task.ItemID,
 		SpecName:  task.SpecName,
 		SpecValue: task.SpecValue,
 		Quantity:  maxDeliveryQuantity(task.Quantity),
+		RunID:     taskAutomationRunID(task),
+		CookieID:  task.AccountID,
 	}
 }
 

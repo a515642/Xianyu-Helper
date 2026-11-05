@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,9 @@ func (s *Server) mountCardsReal(r chi.Router) {
 	r.Post("/cards/{card_id}/items", s.addCardItems)
 	r.Get("/cards/{card_id}/details", s.getCard)
 	r.Get("/cards/{card_id}/stock", s.cardStock)
+	// 售出台账（卡种删除后仍保留）。
+	r.Get("/card-sales", s.listCardSales)
+	r.Get("/cards/{card_id}/sales/export", s.exportCardSales)
 	// 卡密条目（逐条状态管理）。静态段需先于 {card_id} 注册，避免被当作组 ID。
 	r.Get("/cards/items", s.listCardItems)
 	r.Post("/cards/{card_id}/items/export", s.exportCardItems)
@@ -111,6 +115,10 @@ func (s *Server) deleteCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.Cards.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, db.ErrCardInUse) {
+			writeErr(w, http.StatusConflict, "该卡种仍被发货规则或发货模板引用，请先解除绑定后再删除")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "删除失败")
 		return
 	}

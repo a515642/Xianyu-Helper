@@ -230,6 +230,9 @@ type Account struct {
 	wsDialer WSDialer
 	handler  Handler
 	logger   *slog.Logger
+	// dialRetryDelayFn 仅供测试覆盖拨号/注册网络失败的退避时长，参数为连续失败次数；
+	// 生产环境保持 nil 并使用 dialBackoff。
+	dialRetryDelayFn func(failures int) time.Duration
 
 	// 运行时状态（受 mu 保护）
 	mu                 sync.Mutex
@@ -477,7 +480,7 @@ func (a *Account) Run(parent context.Context) error {
 				return ctx.Err()
 			}
 			a.logger.Error("WS 握手失败", "err", err)
-			if retryErr := a.handleWSConnectFailure(ctx, err); retryErr != nil {
+			if retryErr := a.handleWSOpenFailure(ctx, err); retryErr != nil {
 				return retryErr
 			}
 			continue
@@ -530,7 +533,8 @@ func (a *Account) Run(parent context.Context) error {
 			// 网络或服务端瞬时错误不能让账号运行时永久退出。只要登录 Session
 			// 没有明确失效，就持续重试获取连接级 Token。
 			a.setRuntimeState(RuntimeReconnecting, "获取消息凭证失败，正在重试")
-			a.notifyOffline(ctx, "获取消息凭证失败，正在自动重试："+errString(err))
+			// 超时等瞬时错误会持续自动重试，不能套用“需要重新登录”的离线文案。
+			a.notifyDialRetrying(ctx, "获取消息凭证失败，正在自动重试："+errString(err))
 			if sleepErr := sleepCtx(ctx, a.tokenRetryDelay()); sleepErr != nil {
 				return sleepErr
 			}
@@ -567,7 +571,7 @@ func (a *Account) Run(parent context.Context) error {
 				return ctx.Err()
 			}
 			a.logger.Error("WS 注册失败", "err", err)
-			if retryErr := a.handleWSConnectFailure(ctx, err); retryErr != nil {
+			if retryErr := a.handleWSOpenFailure(ctx, err); retryErr != nil {
 				return retryErr
 			}
 			continue
@@ -771,6 +775,27 @@ func (a *Account) startWSRecorder(ctx context.Context) {
 	})
 }
 
+// handleWSOpenFailure 处理拨号或 /reg 阶段的失败：服务端明确的 RegError（Token 无效、
+// 鉴权失败、会话被移除）仍终止账号要求重新登录；其余错误只可能是网络类瞬时故障，
+// 按递增退避重试，不判为凭证失效。返回 nil 表示调用方应继续下一轮连接。
+func (a *Account) handleWSOpenFailure(ctx context.Context, openErr error) error {
+	var regErr *ws.RegError
+	if errors.As(openErr, &regErr) {
+		return a.handleWSConnectFailure(ctx, openErr)
+	}
+	a.clearConnectionToken(ctx)
+	a.mu.Lock()
+	a.connFailures++
+	failures := a.connFailures
+	a.mu.Unlock()
+	a.setRuntimeState(RuntimeReconnecting, "消息服务连接失败，正在自动重试")
+	// 连续失败达到阈值时只提醒一次；连接恢复后沿用既有恢复通知。
+	if failures == 3 {
+		a.notifyDialRetrying(ctx, errString(openErr))
+	}
+	return sleepCtx(ctx, a.dialRetryDelay())
+}
+
 func (a *Account) handleWSConnectFailure(ctx context.Context, err error) error {
 	a.clearConnectionToken(ctx)
 	reason := "消息凭证被拒绝，请重新登录"
@@ -919,6 +944,16 @@ func (a *Account) notifyOffline(ctx context.Context, reason string) {
 	}
 	a.alertEvent(ctx, EventAccountOffline, AlertLevelWarn, "账号已掉线，需要重新登录",
 		fmt.Sprintf("账号 %s 的闲鱼消息连接已进入不可自动重连状态。原因：%s。请更新登录信息或重新登录后再启动账号。", a.CookieID, reason))
+}
+
+// notifyDialRetrying 为拨号失败或消息 Token 获取失败发送一次可自动重试的离线通知。
+// 与 notifyOffline 不同，账号仍会自动重试，文案不要求用户重新登录；连接恢复后沿用既有恢复通知。
+func (a *Account) notifyDialRetrying(ctx context.Context, reason string) {
+	if !a.markOfflineNotified(reason) {
+		return
+	}
+	a.alertEvent(ctx, EventAccountOffline, AlertLevelWarn, "账号消息连接中断，正在自动重试",
+		fmt.Sprintf("账号 %s 暂时无法连接闲鱼消息服务。原因：%s。系统会持续退避重试，连接恢复后自动重新上线。", a.CookieID, reason))
 }
 
 func (a *Account) notifyRecoveringOffline(ctx context.Context, reason string) {
@@ -1264,6 +1299,37 @@ func (a *Account) notifyCredentialUpdated(ctx context.Context) {
 	if handler, ok := a.handler.(credentialUpdateHandler); ok {
 		handler.OnCredentialUpdated(ctx, a.CookieID)
 	}
+}
+
+// dialBackoffSteps 是拨号/注册网络失败的递增退避序列；超过序列长度后保持最后一档。
+var dialBackoffSteps = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+	120 * time.Second,
+}
+
+func dialBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	if failures > len(dialBackoffSteps) {
+		failures = len(dialBackoffSteps)
+	}
+	return dialBackoffSteps[failures-1]
+}
+
+// dialRetryDelay 返回当前连续拨号失败次数对应的退避时长，测试可通过 dialRetryDelayFn 覆盖。
+func (a *Account) dialRetryDelay() time.Duration {
+	a.mu.Lock()
+	failures := a.connFailures
+	override := a.dialRetryDelayFn
+	a.mu.Unlock()
+	if override != nil {
+		return override(failures)
+	}
+	return dialBackoff(failures)
 }
 
 // retryDelay 按错误类型计算退避，并加入 0-30% 抖动。

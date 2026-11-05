@@ -12,13 +12,15 @@ import (
 
 // KeywordRow keywords 表完整行（含自增 id，用于按索引删除）。
 type KeywordRow struct {
-	ID       int64 `json:"id"`
-	CookieID string
-	Keyword  string
-	Reply    string
-	ItemID   string
-	Type     string
-	ImageURL string
+	ID          int64 `json:"id"`
+	CookieID    string
+	Keyword     string
+	Reply       string
+	ItemID      string
+	Type        string
+	ImageURL    string
+	Expressions []string
+	MatchType   string
 }
 
 func (k *Keywords) UpdateByID(ctx context.Context, row KeywordRow) error {
@@ -26,10 +28,17 @@ func (k *Keywords) UpdateByID(ctx context.Context, row KeywordRow) error {
 	if kwType == "" {
 		kwType = "text"
 	}
+	expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+	keyword := row.Keyword
+	if len(expressions) > 0 {
+		keyword = expressions[0]
+	}
 	res, err := k.DB.ExecContext(ctx, `UPDATE keywords
-		SET keyword=?,reply=?,item_id=?,type=?,image_url=?
+		SET keyword=?,reply=?,item_id=?,type=?,image_url=?,keyword_expressions=?,match_type=?
 		WHERE id=? AND cookie_id=?`,
-		row.Keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL), row.ID, row.CookieID)
+		keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+		nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType),
+		row.ID, row.CookieID)
 	if err != nil {
 		return err
 	}
@@ -53,7 +62,8 @@ func (k *Keywords) DeleteByID(ctx context.Context, cookieID string, id int64) er
 // AllRows 取某账号所有关键字（含 id）。
 func (k *Keywords) AllRows(ctx context.Context, cookieID string) ([]KeywordRow, error) {
 	rows, err := k.DB.QueryContext(ctx,
-		`SELECT id, keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,'')
+		`SELECT id, keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,''),
+		        COALESCE(keyword_expressions,''), COALESCE(match_type,'contains')
 		 FROM keywords WHERE cookie_id=? ORDER BY id`, cookieID)
 	if err != nil {
 		return nil, err
@@ -62,23 +72,43 @@ func (k *Keywords) AllRows(ctx context.Context, cookieID string) ([]KeywordRow, 
 	var out []KeywordRow
 	for rows.Next() {
 		var r KeywordRow
-		if err := rows.Scan(&r.ID, &r.Keyword, &r.Reply, &r.ItemID, &r.Type, &r.ImageURL); err != nil {
+		var rawExpressions string
+		if err := rows.Scan(&r.ID, &r.Keyword, &r.Reply, &r.ItemID, &r.Type, &r.ImageURL,
+			&rawExpressions, &r.MatchType); err != nil {
 			return nil, err
 		}
 		r.CookieID = cookieID
+		r.Expressions = decodeKeywordExpressions(rawExpressions, r.Keyword)
+		r.MatchType = NormalizeKeywordMatchType(r.MatchType)
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
-// Add 添加关键字。
+// Add 添加单表达式关键字，保持历史调用方的包含匹配语义。
 func (k *Keywords) Add(ctx context.Context, cookieID, keyword, reply, itemID, kwType, imageURL string) (int64, error) {
+	return k.AddRow(ctx, KeywordRow{
+		CookieID: cookieID, Keyword: keyword, Reply: reply, ItemID: itemID,
+		Type: kwType, ImageURL: imageURL,
+	})
+}
+
+// AddRow 添加带表达式集合和匹配模式的关键字行。
+func (k *Keywords) AddRow(ctx context.Context, row KeywordRow) (int64, error) {
+	kwType := row.Type
 	if kwType == "" {
 		kwType = "text"
 	}
+	expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+	keyword := row.Keyword
+	if len(expressions) > 0 {
+		keyword = expressions[0]
+	}
 	return insertReturningID(ctx, k.DB, k.Dialect,
-		`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url) VALUES (?,?,?,?,?,?)`,
-		cookieID, keyword, reply, nullable(itemID), kwType, nullable(imageURL))
+		`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url, keyword_expressions, match_type)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		row.CookieID, keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+		nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType))
 }
 
 // ReplaceForCookie 覆盖某账号的全部关键词。
@@ -96,9 +126,16 @@ func (k *Keywords) ReplaceForCookie(ctx context.Context, cookieID string, rows [
 		if kwType == "" {
 			kwType = "text"
 		}
+		expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+		keyword := row.Keyword
+		if len(expressions) > 0 {
+			keyword = expressions[0]
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url) VALUES (?,?,?,?,?,?)`,
-			cookieID, row.Keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL)); err != nil {
+			`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url, keyword_expressions, match_type)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			cookieID, keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+			nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType)); err != nil {
 			return err
 		}
 	}
@@ -668,6 +705,21 @@ func (i *Items) SyncFromRemote(ctx context.Context, cookieID string, rows []Item
 	if _, err := tx.ExecContext(ctx, ruleQuery, ruleArgs...); err != nil {
 		return rollback(err)
 	}
+	// 商品在远端被下架/删除后，同步清理 AI 助手绑定，避免残留幽灵商品。
+	bindArgs := make([]any, 0, len(remoteIDs)+1)
+	bindArgs = append(bindArgs, cookieID)
+	bindQuery := `DELETE FROM ai_profile_items WHERE cookie_id=?`
+	if len(remoteIDs) > 0 {
+		placeholders := make([]string, 0, len(remoteIDs))
+		for itemID := range remoteIDs {
+			placeholders = append(placeholders, "?")
+			bindArgs = append(bindArgs, itemID)
+		}
+		bindQuery += ` AND item_id NOT IN (` + strings.Join(placeholders, ",") + ")"
+	}
+	if _, err := tx.ExecContext(ctx, bindQuery, bindArgs...); err != nil {
+		return rollback(err)
+	}
 	if err := tx.Commit(); err != nil {
 		return ItemSyncResult{}, err
 	}
@@ -707,7 +759,7 @@ func (i *Items) upsertBasic(ctx context.Context, execer sqlExecer, r *ItemInfoRo
 	return err
 }
 
-// Delete 逻辑删除商品及其商品级自动化规则，保留历史数据以便审计和恢复。
+// Delete 逻辑删除商品及其商品级自动化规则，并解除 AI 助手绑定，避免残留幽灵商品。
 func (i *Items) Delete(ctx context.Context, cookieID, itemID string) error {
 	tx, err := i.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -722,6 +774,10 @@ func (i *Items) Delete(ctx context.Context, cookieID, itemID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE automation_rules
 		SET deleted_at=CURRENT_TIMESTAMP, enabled=0, updated_at=CURRENT_TIMESTAMP
 		WHERE cookie_id=? AND item_id=? AND deleted_at IS NULL`, cookieID, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_profile_items
+		WHERE cookie_id=? AND item_id=?`, cookieID, itemID); err != nil {
 		return err
 	}
 	return tx.Commit()

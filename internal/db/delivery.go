@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 )
 
 // ItemInfo 对应 item_info 表。
@@ -85,63 +86,112 @@ type CardItemMeta struct {
 	BuyerID   string
 	BuyerName string
 	OrderID   string
+	ItemID    string
 	SpecName  string
 	SpecValue string
 	Quantity  int
+	// RunID 是触发本次发货的自动化运行；人工路径可以为零。
+	RunID int64
+	// CookieID 是订单所属闲鱼账号，用于按订单隔离台账。
+	CookieID string
 }
 
 // ReserveDataItem 原子预留一条可用卡密（data 类型），返回条目 ID 和内容。
-// 发送确定失败时应调用 ReleaseDataItem 归还；发送结果不确定时保留已用状态供人工核对。
+// 库存扣减与 reserved 台账写入在同一事务内完成；发送确定失败时应调用
+// ReleaseDataItem 归还，发送结果不确定时保留台账供人工核对。
 func (c *Cards) ReserveDataItem(ctx context.Context, cardID int64, meta CardItemMeta) (int64, string, error) {
 	quantity := meta.Quantity
 	if quantity <= 0 {
 		quantity = 1
 	}
 	for attempts := 0; attempts < 20; attempts++ {
-		var itemID int64
-		var content string
-		err := c.DB.QueryRowContext(ctx,
-			`SELECT id, content FROM card_items WHERE card_id=? AND status='available' ORDER BY id LIMIT 1`,
-			cardID).Scan(&itemID, &content)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return 0, "", ErrCardStockEmpty
-			}
-			return 0, "", err
-		}
-		res, err := c.DB.ExecContext(ctx,
-			`UPDATE card_items SET status='used',buyer_id=?,buyer_name=?,order_id=?,spec_name=?,spec_value=?,
-			        quantity=?,sold_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-			 WHERE id=? AND status='available'`,
-			nullable(meta.BuyerID), nullable(meta.BuyerName), nullable(meta.OrderID),
-			nullable(meta.SpecName), nullable(meta.SpecValue), quantity, itemID)
-		if err != nil {
-			return 0, "", err
-		}
-		if affected, err := res.RowsAffected(); err == nil && affected == 1 {
-			return itemID, content, nil
+		itemID, content, retry, err := c.tryReserveDataItem(ctx, cardID, meta, quantity)
+		if err != nil || !retry {
+			return itemID, content, err
 		}
 	}
 	return 0, "", errors.New("卡密库存并发修改过于频繁，请稍后重试")
 }
 
-// ReleaseDataItem 把发送失败的预留卡密恢复为可用并清空售出归属。
+// tryReserveDataItem 执行一次事务内的扣库存加记账；retry 为 true 表示 CAS 未命中。
+func (c *Cards) tryReserveDataItem(ctx context.Context, cardID int64, meta CardItemMeta, quantity int) (itemID int64, content string, retry bool, err error) {
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, "", false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var userID int64
+	var cardName, cardKind string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(user_id,1), COALESCE(name,''), COALESCE(kind,'') FROM cards WHERE id=?`,
+		cardID).Scan(&userID, &cardName, &cardKind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", false, ErrNotFound
+		}
+		return 0, "", false, err
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, content FROM card_items WHERE card_id=? AND status='available' ORDER BY id LIMIT 1`,
+		cardID).Scan(&itemID, &content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", false, ErrCardStockEmpty
+		}
+		return 0, "", false, err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE card_items SET status='used',buyer_id=?,buyer_name=?,order_id=?,spec_name=?,spec_value=?,
+		        quantity=?,sold_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND status='available'`,
+		nullable(meta.BuyerID), nullable(meta.BuyerName), nullable(meta.OrderID),
+		nullable(meta.SpecName), nullable(meta.SpecValue), quantity, itemID)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if affected, affectedErr := res.RowsAffected(); affectedErr != nil || affected != 1 {
+		return 0, "", affectedErr == nil, affectedErr
+	}
+	now := time.Now().UTC().Unix()
+	if _, err := insertCardSale(ctx, tx, c.Dialect, CardSaleRecord{
+		UserID: userID, CardID: cardID, CardItemID: itemID, CardName: cardName, CardKind: cardKind,
+		Content: content, Status: CardSaleReserved, RunID: meta.RunID,
+		CookieID: meta.CookieID, OrderID: meta.OrderID, ItemID: meta.ItemID, BuyerID: meta.BuyerID,
+		CreatedAt: now, SoldAt: 0,
+	}); err != nil {
+		return 0, "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, "", false, err
+	}
+	return itemID, content, false, nil
+}
+
+// ReleaseDataItem 把发送失败的预留卡密恢复为可用、清空售出归属并删除对应的
+// reserved 台账，三者在同一事务内完成。
 func (c *Cards) ReleaseDataItem(ctx context.Context, itemID int64) error {
 	if itemID <= 0 {
 		return errors.New("恢复卡密缺少条目ID")
 	}
-	res, err := c.DB.ExecContext(ctx,
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE card_items SET status='available',buyer_id=NULL,buyer_name=NULL,order_id=NULL,
 		        spec_name=NULL,spec_value=NULL,quantity=1,sold_at=NULL,updated_at=CURRENT_TIMESTAMP
 		 WHERE id=? AND status='used'`, itemID)
 	if err != nil {
 		return err
 	}
-	affected, err := res.RowsAffected()
-	if err == nil && affected == 0 {
+	if affected, affectedErr := res.RowsAffected(); affectedErr == nil && affected == 0 {
 		return errors.New("卡密条目不可归还或已被修改")
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM card_sale_records WHERE card_item_id=? AND status=?`,
+		itemID, CardSaleReserved); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // splitLines / joinLines 统一处理多行库存内容。

@@ -256,6 +256,34 @@ export interface CardItemPage {
   total_pages: number;
 }
 
+// 卡密售出台账：预留时 reserved，确认发送后 sold；卡种删除后仍保留。
+export type CardSaleStatus = 'reserved' | 'sold';
+
+export interface CardSaleRecord {
+  id: number;
+  card_id: number;
+  card_item_id: number;
+  card_name: string;
+  card_kind: string;
+  content: string;
+  status: CardSaleStatus;
+  run_id: number;
+  cookie_id: string;
+  order_id: string;
+  item_id: string;
+  buyer_id: string;
+  created_at: number;
+  sold_at: number;
+}
+
+export interface CardSalePage {
+  records: CardSaleRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 // Items
 export interface Item {
   id: string | number;
@@ -353,8 +381,10 @@ export interface ShippingVariant {
 export interface ReplyRule {
   id: string;
   keyword: string;
+  /** 匹配表达式集合；每行一个，任意命中即回复。旧数据回退到 keyword。 */
+  expressions?: string[];
   reply_content: string;
-  match_type: 'exact' | 'fuzzy';
+  match_type: 'contains' | 'regexp';
   enabled: boolean;
   item_id?: string;
   type?: 'text' | 'image';
@@ -431,6 +461,26 @@ export interface DefaultReply {
   reply_content: string;
   reply_once: boolean;
   reply_image_url?: string;
+}
+
+// 商品首次回复规则：买家首次咨询指定商品时发送一次。
+export interface ItemGreetingRule {
+  id: number;
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  reply_content: string;
+  reply_image_url: string;
+  item_ids: string[];
+}
+
+export interface ItemGreetingRuleInput {
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  reply_content: string;
+  reply_image_url: string;
+  item_ids: string[];
 }
 
 // 通知渠道

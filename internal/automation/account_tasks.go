@@ -94,17 +94,21 @@ func (c *Center) scanAccountTasks(ctx context.Context) {
 		if blocked, blockErr := c.accountTaskSessionBlocked(ctx, setting.CookieID); blockErr != nil || blocked {
 			continue
 		}
+		// blockedByPlatform 表示本轮该账号已遇到风控或会话失效，剩余账号任务不再请求平台。
+		blockedByPlatform := false
 		if setting.AutoRateEnabled {
 			if _, err := c.runConfiguredAccountTask(ctx, setting, TaskAutoRate); err != nil {
 				c.logger.Warn("自动评价扫描失败", "account", setting.CookieID, "err", err)
+				blockedByPlatform = isPlatformBlockErr(err)
 			}
 		}
-		if setting.AutoRedFlowerEnabled {
+		if !blockedByPlatform && setting.AutoRedFlowerEnabled {
 			if _, err := c.runRedFlower(ctx, setting); err != nil {
 				c.logger.Warn("求小红花扫描失败", "account", setting.CookieID, "err", err)
+				blockedByPlatform = isPlatformBlockErr(err)
 			}
 		}
-		if setting.AutoPolishEnabled && polishDue(setting, now) {
+		if !blockedByPlatform && setting.AutoPolishEnabled && polishDue(setting, now) {
 			if blocked, _ := c.accountTaskSessionBlocked(ctx, setting.CookieID); blocked {
 				continue
 			}
@@ -114,7 +118,11 @@ func (c *Center) scanAccountTasks(ctx context.Context) {
 			}
 			if taskErr != nil {
 				c.logger.Warn("每日擦亮失败", "account", setting.CookieID, "err", taskErr)
+				blockedByPlatform = isPlatformBlockErr(taskErr)
 			}
+		}
+		if blockedByPlatform {
+			c.logger.Info("账号本轮已触发平台阻断，跳过其余账号任务", "account", setting.CookieID)
 		}
 	}
 }
@@ -202,7 +210,7 @@ func (c *Center) runAutoRate(ctx context.Context, settings db.AccountTaskSetting
 			}
 			_ = c.store.AccountTasks.FinishRun(ctx, runKey, "failed", 0, 1, message, time.Now().UTC().Add(10*time.Minute).Unix())
 			summary.Failed++
-			if mtop.IsSessionExpiredErr(rateErr) {
+			if isPlatformBlockErr(rateErr) {
 				return summary, rateErr
 			}
 			continue
@@ -258,7 +266,7 @@ func (c *Center) runAutoPolish(ctx context.Context, settings db.AccountTaskSetti
 			if result != nil && result.Message != "" {
 				lastError = result.Message
 			}
-			if mtop.IsSessionExpiredErr(polishErr) {
+			if isPlatformBlockErr(polishErr) {
 				_ = c.store.AccountTasks.FinishRun(ctx, runKey, "failed", summary.Success, summary.Failed, lastError, 0)
 				return summary, polishErr
 			}

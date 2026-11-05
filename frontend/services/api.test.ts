@@ -9,7 +9,10 @@ import {
   getAccountDetails,
   getAIProfiles,
 	getCards,
+	getCardSales,
+	exportCardSales,
 	getAutomationIssues,
+	getAutomationAuditEvents,
   getItems,
 	getItemPublishBatches,
 	getNotificationChannels,
@@ -131,6 +134,17 @@ test('automation issue APIs expose and resolve quarantined work', async () => {
 	expect(fetchMock.mock.calls[1][0]).toBe('/automation-runs/1/resolve');
 	expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ resolution: 'continue' });
 	expect(fetchMock.mock.calls[2][0]).toBe('/automation-pending-tasks/2/resolve');
+});
+
+test('automation audit events drop empty filters and normalize the response', async () => {
+	const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+		items: [{ id: 1, event_type: 'action_failed', status: 'failed' }],
+		total: 7,
+	}));
+	vi.stubGlobal('fetch', fetchMock);
+	const result = await getAutomationAuditEvents({ cookie_id: '', status: 'failed', event_type: 'action_failed', limit: 100 });
+	expect(fetchMock.mock.calls[0][0]).toBe('/automation-audit-events?status=failed&event_type=action_failed&limit=100');
+	expect(result).toEqual({ items: [{ id: 1, event_type: 'action_failed', status: 'failed' }], total: 7 });
 });
 
 test('order multipart requests use the shared authenticated form request path', async () => {
@@ -552,8 +566,9 @@ test('getReplyRules labels keyword matching according to engine contains behavio
   expect(rules[0]).toMatchObject({
     id: '42',
     keyword: '发货',
+    expressions: ['发货'],
     reply_content: '马上安排',
-    match_type: 'fuzzy',
+    match_type: 'contains',
     type: 'image',
     image_url: 'https://img.example/reply.png',
   });
@@ -571,7 +586,8 @@ test('updateReplyRule preserves keyword image metadata when saving text edits', 
     credentials: 'include',
   }));
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-    keyword: '发货', reply: '稍后安排', item_id: 'item-1', type: 'text', image_url: '',
+    keyword: '发货', expressions: ['发货'], match_type: 'contains',
+    reply: '稍后安排', item_id: 'item-1', type: 'text', image_url: '',
   });
 });
 
@@ -581,7 +597,8 @@ test('updateReplyRule clears stale content when switching reply type', async () 
 
   await updateReplyRule({ id: '42', keyword: '发货', type: 'image', image_url: 'https://img.example/new.png' }, 'acc1');
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-    keyword: '发货', reply: '', item_id: '', type: 'image', image_url: 'https://img.example/new.png',
+    keyword: '发货', expressions: ['发货'], match_type: 'contains',
+    reply: '', item_id: '', type: 'image', image_url: 'https://img.example/new.png',
   });
 });
 
@@ -804,4 +821,34 @@ test('updateShippingRule posts review request text action without card requireme
       message_template: '亲，方便的话麻烦给个评价～',
     }),
   ]);
+});
+
+test('getCardSales trims search and builds the ledger query', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+    records: [{ id: 1, card_id: 3, content: 'K1', status: 'sold' }],
+    total: 1, page: 2, page_size: 20, total_pages: 1,
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  const page = await getCardSales({ card_id: 3, status: 'sold', search: ' K1 ', page: 2 });
+  expect(fetchMock.mock.calls[0][0]).toBe('/card-sales?card_id=3&status=sold&search=K1&page=2&page_size=20');
+  expect(page.records[0]).toMatchObject({ content: 'K1', status: 'sold' });
+});
+
+test('exportCardSales streams the CSV for the current status filter', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response('卡密内容\r\nK1\r\n', {
+    status: 200,
+    headers: { 'content-type': 'text/csv; charset=utf-8' },
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  const blob = await exportCardSales(3, 'reserved');
+  expect(fetchMock).toHaveBeenCalledWith('/cards/3/sales/export?status=reserved', { credentials: 'include' });
+  expect(await blob.text()).toContain('K1');
+});
+
+test('exportCardSales surfaces the backend error detail', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: '卡种不存在' }), {
+    status: 404,
+    headers: { 'content-type': 'application/json' },
+  })));
+  await expect(exportCardSales(9)).rejects.toThrow('卡种不存在');
 });

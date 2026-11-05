@@ -328,27 +328,62 @@ func TestRun_ConnectsAndDispatchesMessage(t *testing.T) {
 	}
 }
 
-// TestRun_DialFailureRequiresRelogin mirrors the web page: native
-// CONNECT_FAILED enters CONN_ERROR and does not auto-reconnect.
-func TestRun_DialFailureRequiresRelogin(t *testing.T) {
+// TestRun_DialFailuresRetryAndNotify 验证网络类拨号失败属于瞬时故障：
+// 账号保持运行并持续退避重试，连续失败达到阈值时只提醒一次，不判定为凭证失效。
+func TestRun_DialFailuresRetryAndNotify(t *testing.T) {
 	acc, _, _, cleanup := newRunAccount(t, &fakeRunMtop{token: "tok-1"})
 	defer cleanup()
+	h := &alertRecordingHandler{}
+	acc.handler = h
 
-	// 拨号始终失败。
-	acc.wsDialer = &fakeDialer{results: []dialResult{{err: errFakeDial}}}
+	// 拨号始终失败；fakeDialer 超出预设后会持续返回最后一个错误。
+	dialer := &fakeDialer{results: []dialResult{{err: errFakeDial}}}
+	acc.wsDialer = dialer
+	acc.dialRetryDelayFn = func(int) time.Duration { return time.Millisecond }
 
+	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
-	go func() { runDone <- acc.Run(context.Background()) }()
+	go func() { runDone <- acc.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for dialerCallCount(dialer) < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if calls := dialerCallCount(dialer); calls < 3 {
+		cancel()
+		<-runDone
+		t.Fatalf("网络拨号失败后应持续重试，dial calls=%d", calls)
+	}
 	select {
 	case err := <-runDone:
-		if !errors.Is(err, errFakeDial) {
-			t.Fatalf("Run error=%v，期望拨号错误", err)
+		t.Fatalf("网络拨号失败不应退出 Run: err=%v", err)
+	default:
+	}
+	if state := acc.RuntimeStatus().State; state == RuntimeAuthExpired {
+		cancel()
+		<-runDone
+		t.Fatalf("网络拨号失败不应置为凭证失效: %q", state)
+	}
+	alerts := h.alertsSnapshot()
+	if len(alerts) != 1 {
+		cancel()
+		<-runDone
+		t.Fatalf("连续失败应只提醒一次，alerts=%+v", alerts)
+	}
+	if alerts[0].title != "账号消息连接中断，正在自动重试" {
+		cancel()
+		<-runDone
+		t.Fatalf("title=%q want 自动重试提示", alerts[0].title)
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error=%v want context canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("拨号失败后 Run 未退出")
-	}
-	if status := acc.RuntimeStatus(); status.State != RuntimeAuthExpired {
-		t.Fatalf("runtime state=%q，期望 %q", status.State, RuntimeAuthExpired)
+		t.Fatal("取消后 Run 未退出")
 	}
 }
 

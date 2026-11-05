@@ -4,7 +4,7 @@ import type { Card, CardKind } from '../types';
 import { getCards, createCard, updateCard, deleteCard, batchCreateCards, type CardBatchResult } from '../services/api';
 import {
   CreditCard, Edit, FileDown, FileText, Image as ImageIcon, ListChecks, Loader2, Package, Plus,
-  Save, Search, Upload, X,
+  Save, Search, Trash2, Upload, X,
 } from 'lucide-react';
 import { cardContentLabel, filterCards } from './cardListState';
 import CardItems from './CardItems';
@@ -343,6 +343,13 @@ const CardList: React.FC = () => {
                         title="编辑卡种"
                       >
                         <Edit className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(card)}
+                        className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                        title="删除卡种"
+                      >
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   </td>

@@ -352,13 +352,34 @@ func (c *Cards) SetStatus(ctx context.Context, userID int64, itemIDs []int64, st
 		args = append(args, id)
 	}
 	args = append(args, userID)
-	res, err := c.DB.ExecContext(ctx,
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE card_items SET `+setClause+` WHERE id IN (`+placeholders+`) AND user_id=?`, args...)
 	if err != nil {
 		return 0, err
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
+		return 0, err
+	}
+	if status == CardItemAvailable {
+		// 人工回库后，原来未确认的售出台账不再成立。
+		deleteArgs := make([]any, 0, len(ids)+1)
+		for _, id := range ids {
+			deleteArgs = append(deleteArgs, id)
+		}
+		deleteArgs = append(deleteArgs, CardSaleReserved)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM card_sale_records WHERE card_item_id IN (`+placeholders+`) AND status=?`,
+			deleteArgs...); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return int(affected), nil

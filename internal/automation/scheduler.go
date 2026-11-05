@@ -7,12 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 const defaultReviewRequestScanInterval = time.Minute
+
+// isPlatformBlockErr 判断错误是否表示该账号当前不应再请求平台：风控验证或登录会话失效。
+// 批量扫描遇到这类错误必须立即停止同账号的其余任务，不能依赖冷却后自动重放。
+func isPlatformBlockErr(err error) bool {
+	return err != nil && (mtop.IsRiskVerificationErr(err) || mtop.IsSessionExpiredErr(err))
+}
 
 // Scheduler 执行计划任务类自动化。
 // 计划任务只负责“发现应该触发的任务”，具体动作仍交给 Center，避免形成第二套执行链。
@@ -21,6 +29,8 @@ type Scheduler struct {
 	interval time.Duration
 	runOnce  sync.Once
 	done     chan struct{}
+	// auditPrunedAt 是上次审计清理的 Unix 秒，零值表示尚未清理过。
+	auditPrunedAt atomic.Int64
 }
 
 // NewScheduler 构造计划任务调度器。
@@ -59,6 +69,7 @@ func (s *Scheduler) Wait() {
 }
 
 func (s *Scheduler) scan(ctx context.Context) {
+	s.pruneAuditEvents(ctx)
 	s.runDeferredTasks(ctx)
 	s.center.scanAccountTasks(ctx)
 	if recovered, err := s.center.store.Automation.RecoverDefinitelyUnsentReviewRuns(ctx); err != nil {
@@ -68,8 +79,10 @@ func (s *Scheduler) scan(ctx context.Context) {
 	}
 	s.runRecoveryTasks(ctx)
 	// 逐页执行，避免把所有到期订单一次性装入内存。稳定 ID 游标确保本轮有界。
+	// blockedAccounts 记录本轮已遇到风控或会话失效的账号；其余订单留待下一轮，不再请求平台。
 	afterOrderID := ""
 	waitingForWS := map[string]int{}
+	blockedAccounts := map[string]struct{}{}
 	for {
 		orders, err := s.center.store.Automation.DueReviewRequestOrdersAfter(ctx, afterOrderID, 200)
 		if err != nil {
@@ -77,6 +90,9 @@ func (s *Scheduler) scan(ctx context.Context) {
 			return
 		}
 		for _, order := range orders {
+			if _, blocked := blockedAccounts[order.CookieID]; blocked {
+				continue
+			}
 			allowed, allowErr := s.center.accountAutomationAllowed(ctx, order.CookieID)
 			if allowErr != nil {
 				s.center.logger.Warn("检查求评价账号状态失败", "account", order.CookieID, "err", allowErr)
@@ -107,6 +123,10 @@ func (s *Scheduler) scan(ctx context.Context) {
 						"order_id": order.OrderID, "attempt": order.ReviewRequestCount + 1}}
 				if err := s.center.executeRule(ctx, task, rule); err != nil {
 					s.center.logger.Warn("求评价计划任务执行失败", "account", order.CookieID, "order_id", order.OrderID, "rule_id", rule.ID, "err", err)
+					if isPlatformBlockErr(err) {
+						blockedAccounts[order.CookieID] = struct{}{}
+						break
+					}
 				}
 			}
 		}
@@ -126,7 +146,13 @@ func (s *Scheduler) runRecoveryTasks(ctx context.Context) {
 		s.center.logger.Warn("扫描失败自动化运行失败", "err", err)
 		return
 	}
+	// blockedAccounts 记录本轮已遇到风控或会话失效的账号；其余运行留待下一轮，不再请求平台。
+	blockedAccounts := map[string]struct{}{}
 	for _, run := range runs {
+		if _, blocked := blockedAccounts[run.CookieID]; blocked {
+			s.center.logger.Info("账号本轮已触发平台阻断，跳过其余恢复运行", "run_id", run.ID, "account", run.CookieID)
+			continue
+		}
 		if run.ActionStarted {
 			reason := "进程在外部动作执行期间中断，发送结果未知，已禁止自动重放"
 			_ = s.center.store.Automation.QuarantineRun(ctx, run.ID, run.AttemptCount, reason)
@@ -178,6 +204,9 @@ func (s *Scheduler) runRecoveryTasks(ctx context.Context) {
 		task.Raw["automation_rule_id"] = run.RuleID
 		if err := s.center.executeRule(ctx, task, *rule); err != nil && !errors.Is(err, errAutomationDeferred) {
 			s.center.logger.Warn("重试自动化运行失败", "run_id", run.ID, "err", err)
+			if isPlatformBlockErr(err) {
+				blockedAccounts[run.CookieID] = struct{}{}
+			}
 		}
 	}
 }
@@ -204,7 +233,14 @@ func (s *Scheduler) runDeferredTasks(ctx context.Context) {
 		s.center.logger.Warn("扫描暂停期间自动化事件失败", "err", err)
 		return
 	}
+	// blockedAccounts 记录本轮已遇到风控或会话失效的账号；这些账号的剩余任务不再请求平台，
+	// 已领取但被跳过的任务保持 running，租约到期后才会被重新领取，形成天然冷却。
+	blockedAccounts := map[string]struct{}{}
 	for _, pending := range tasks {
+		if _, blocked := blockedAccounts[pending.CookieID]; blocked {
+			s.center.logger.Info("账号本轮已触发平台阻断，跳过其余延迟任务", "task_id", pending.ID, "account", pending.CookieID)
+			continue
+		}
 		var task Task
 		if err := json.Unmarshal([]byte(pending.TaskJSON), &task); err != nil {
 			_ = s.center.store.Automation.FinishDeferredTask(ctx, pending.ID, pending.ClaimVersion, false, "解析任务失败: "+err.Error())
@@ -215,6 +251,9 @@ func (s *Scheduler) runDeferredTasks(ctx context.Context) {
 		}
 		task.Raw["automation_deferred_replay"] = true
 		deferredAgain, runErr := s.center.handleTask(ctx, task)
+		if isPlatformBlockErr(runErr) {
+			blockedAccounts[pending.CookieID] = struct{}{}
+		}
 		if deferredAgain {
 			// handleTask 已按新的 paused_until 重置同一任务；当前 claim 不再删除。
 			continue

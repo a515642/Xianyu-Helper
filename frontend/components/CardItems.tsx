@@ -2,12 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowDownToLine, ArrowUpFromLine, Ban, ChevronLeft, ChevronRight, Copy, Download,
-  FileDown, Loader2, Package, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, X,
+  FileDown, Loader2, Package, Plus, RefreshCw, ScrollText, Search, SlidersHorizontal, Trash2, X,
 } from 'lucide-react';
 import {
-  addCardItems, bulkUpdateCardItems, deleteCardItems, exportCardItems, getCardItems, updateCardItem,
+  addCardItems, bulkUpdateCardItems, deleteCardItems, exportCardItems, exportCardSales, getCardItems, getCardSales, updateCardItem,
 } from '../services/api';
-import type { Card, CardItem, CardItemPage, CardItemStatus } from '../types';
+import type { Card, CardItem, CardItemPage, CardItemStatus, CardSalePage, CardSaleStatus } from '../types';
+import { formatLocalDateTime } from '../dateTime';
 import { kindMeta } from './CardList';
 
 type Props = {
@@ -22,6 +23,12 @@ const statusMeta: Record<CardItemStatus, { label: string; className: string }> =
 };
 
 const emptyPage: CardItemPage = { items: [], total: 0, page: 1, page_size: 20, total_pages: 0 };
+const emptySalePage: CardSalePage = { records: [], total: 0, page: 1, page_size: 20, total_pages: 0 };
+
+const saleStatusMeta: Record<CardSaleStatus, { label: string; className: string }> = {
+  reserved: { label: '待核对', className: 'bg-amber-50 text-amber-700' },
+  sold: { label: '已售出', className: 'bg-emerald-50 text-emerald-700' },
+};
 
 const CardItems: React.FC<Props> = ({ card, onBack }) => {
   const [page, setPage] = useState(1);
@@ -43,6 +50,13 @@ const CardItems: React.FC<Props> = ({ card, onBack }) => {
   const [buyerId, setBuyerId] = useState('');
   const [buyerName, setBuyerName] = useState('');
   const [orderId, setOrderId] = useState('');
+
+  const [showSales, setShowSales] = useState(false);
+  const [saleData, setSaleData] = useState<CardSalePage>(emptySalePage);
+  const [saleStatus, setSaleStatus] = useState<CardSaleStatus | ''>('');
+  const [saleSearch, setSaleSearch] = useState('');
+  const [salePage, setSalePage] = useState(1);
+  const [salesBusy, setSalesBusy] = useState(false);
 
   const isFixed = card.kind === 'text' || card.kind === 'image';
 
@@ -66,7 +80,42 @@ const CardItems: React.FC<Props> = ({ card, onBack }) => {
 
   useEffect(() => { load(); }, [load]);
 
+  const loadSales = useCallback(async () => {
+    setSalesBusy(true);
+    try {
+      const res = await getCardSales({
+        card_id: card.id, status: saleStatus, search: saleSearch, page: salePage, page_size: 20,
+      });
+      setSaleData(res);
+    } catch (error) {
+      console.error('加载售出台账失败:', error);
+    } finally {
+      setSalesBusy(false);
+    }
+  }, [card.id, saleStatus, saleSearch, salePage]);
+
+  useEffect(() => {
+    if (showSales) void loadSales();
+  }, [showSales, loadSales]);
+
   const totalPages = Math.max(1, data.total_pages || 1);
+  const saleTotalPages = Math.max(1, saleData.total_pages || 1);
+
+  const handleExportSales = async () => {
+    try {
+      const blob = await exportCardSales(card.id, saleStatus);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${card.name}-售出.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      alert('导出售出台账失败：' + (error?.message || '请重试'));
+    }
+  };
 
   const resetFilters = () => {
     setStatusFilter(''); setKeyword('');
@@ -242,6 +291,13 @@ const CardItems: React.FC<Props> = ({ card, onBack }) => {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => { setSalePage(1); setShowSales(true); }}
+            className="px-4 py-3 bg-gray-100 hover:bg-gray-200 rounded-2xl font-bold text-gray-700 flex items-center gap-2 transition-colors"
+          >
+            <ScrollText className="w-5 h-5" />
+            售出台账
+          </button>
           <button
             onClick={load}
             className="px-4 py-3 bg-gray-100 hover:bg-gray-200 rounded-2xl font-bold text-gray-700 flex items-center gap-2 transition-colors"
@@ -564,6 +620,121 @@ const CardItems: React.FC<Props> = ({ card, onBack }) => {
                 <button onClick={copyContent}
                   className="ios-btn-primary inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl font-bold">
                   <Copy className="h-4 w-4" /> 复制内容
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>, document.body)}
+
+      {/* 售出台账 */}
+      {showSales && createPortal(
+        <div className="modal-overlay-centered" onClick={() => setShowSales(false)}>
+          <div className="modal-container" onClick={e => e.stopPropagation()} style={{ maxWidth: '880px' }}>
+            <div className="modal-header flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">售出台账</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  {card.name} · 共 {saleData.total} 条 · 卡种删除后记录仍保留
+                </p>
+              </div>
+              <button onClick={() => setShowSales(false)} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4 p-6">
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-gray-400">状态</label>
+                  <select
+                    value={saleStatus}
+                    onChange={e => { setSaleStatus(e.target.value as CardSaleStatus | ''); setSalePage(1); }}
+                    className="ios-input rounded-xl border-none bg-white py-2.5 px-3 text-sm shadow-sm"
+                  >
+                    <option value="">全部状态</option>
+                    <option value="reserved">待核对</option>
+                    <option value="sold">已售出</option>
+                  </select>
+                </div>
+                <div className="min-w-[200px] flex-1">
+                  <label className="mb-1 block text-xs font-bold text-gray-400">搜索</label>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                    <input
+                      value={saleSearch}
+                      onChange={e => { setSaleSearch(e.target.value); setSalePage(1); }}
+                      placeholder="订单号 / 买家 / 卡密内容"
+                      className="ios-input w-full rounded-xl border-none bg-white py-2.5 pl-9 pr-3 text-sm shadow-sm"
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={handleExportSales}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-gray-100 px-4 py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-200"
+                  title="按当前状态筛选导出 CSV"
+                >
+                  <FileDown className="h-4 w-4" /> 导出 CSV
+                </button>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-gray-100">
+                <table className="w-full border-collapse text-left">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="px-3 py-3 text-xs font-bold text-gray-400">卡密内容</th>
+                      <th className="px-3 py-3 text-xs font-bold text-gray-400">状态</th>
+                      <th className="px-3 py-3 text-xs font-bold text-gray-400">订单 / 买家</th>
+                      <th className="px-3 py-3 text-xs font-bold text-gray-400">扣减时间</th>
+                      <th className="px-3 py-3 text-xs font-bold text-gray-400">确认时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {salesBusy && (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-8 text-center text-sm text-gray-400">
+                          <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" /> 加载中
+                        </td>
+                      </tr>
+                    )}
+                    {!salesBusy && saleData.records.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-8 text-center text-sm text-gray-400">暂无售出记录</td>
+                      </tr>
+                    )}
+                    {!salesBusy && saleData.records.map(record => {
+                      const meta = saleStatusMeta[record.status] || saleStatusMeta.reserved;
+                      return (
+                        <tr key={record.id} className="border-t border-gray-100 align-top">
+                          <td className="max-w-[240px] px-3 py-3">
+                            <div className="truncate font-mono text-xs text-gray-700" title={record.content}>{record.content}</div>
+                            <div className="mt-1 text-[11px] text-gray-400">
+                              卡种 ID {record.card_id}{record.run_id > 0 ? ` · 运行 #${record.run_id}` : ''}
+                            </div>
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${meta.className}`}>{meta.label}</span>
+                          </td>
+                          <td className="px-3 py-3 text-xs text-gray-500">
+                            <div>{record.order_id || '-'}</div>
+                            <div className="mt-1 text-gray-400">{record.buyer_id || '-'}{record.cookie_id ? ` · ${record.cookie_id}` : ''}</div>
+                          </td>
+                          <td className="px-3 py-3 text-xs text-gray-500">{formatLocalDateTime(record.created_at * 1000)}</td>
+                          <td className="px-3 py-3 text-xs text-gray-500">{record.sold_at > 0 ? formatLocalDateTime(record.sold_at * 1000) : '-'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button onClick={() => setSalePage(p => Math.max(1, p - 1))} disabled={salePage <= 1 || salesBusy}
+                  className="inline-flex items-center gap-1 rounded-xl bg-gray-100 px-3 py-2 text-xs font-bold text-gray-600 disabled:opacity-40">
+                  <ChevronLeft className="h-4 w-4" /> 上一页
+                </button>
+                <span className="text-xs font-bold text-gray-500">{salePage} / {saleTotalPages}</span>
+                <button onClick={() => setSalePage(p => Math.min(saleTotalPages, p + 1))} disabled={salePage >= saleTotalPages || salesBusy}
+                  className="inline-flex items-center gap-1 rounded-xl bg-gray-100 px-3 py-2 text-xs font-bold text-gray-600 disabled:opacity-40">
+                  下一页 <ChevronRight className="h-4 w-4" />
                 </button>
               </div>
             </div>

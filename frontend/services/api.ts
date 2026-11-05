@@ -1,8 +1,8 @@
 import { get, post, put, del, postForm, type RequestControlOptions } from '../request';
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
-  AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, SystemSettings, ApiResponse, OrderAnalytics,
-  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
+  AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, CardSalePage, CardSaleStatus, SystemSettings, ApiResponse, OrderAnalytics,
+  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, ItemGreetingRule, ItemGreetingRuleInput, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
@@ -596,6 +596,44 @@ export const exportCardItems = async (
   return res.blob();
 };
 
+// 卡密售出台账（预留/已售），卡种删除后仍可查询。
+export const getCardSales = async (query: {
+  card_id?: number;
+  status?: CardSaleStatus | '';
+  search?: string;
+  cookie_id?: string;
+  order_id?: string;
+  page?: number;
+  page_size?: number;
+} = {}): Promise<CardSalePage> => {
+  return get<CardSalePage>('/card-sales', {
+    card_id: query.card_id || undefined,
+    status: query.status || undefined,
+    search: query.search?.trim() || undefined,
+    cookie_id: query.cookie_id?.trim() || undefined,
+    order_id: query.order_id?.trim() || undefined,
+    page: query.page ?? 1,
+    page_size: query.page_size ?? 20,
+  });
+};
+
+export const exportCardSales = async (
+  cardId: string | number,
+  status?: CardSaleStatus | '',
+): Promise<Blob> => {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  const suffix = params.toString() ? `?${params}` : '';
+  const res = await fetch(`/cards/${cardId}/sales/export${suffix}`, { credentials: 'include' });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let detail = text;
+    try { detail = JSON.parse(text)?.detail || text; } catch { /* 非 JSON 时直接用原文 */ }
+    throw new Error(detail || '导出失败');
+  }
+  return res.blob();
+};
+
 export const updateCardItem = async (itemId: string | number, data: { content?: string; status?: CardItemStatus }): Promise<CardItem> => {
   return put(`/cards/items/${itemId}`, data);
 };
@@ -999,24 +1037,94 @@ export const resolveAutomationRun = async (id: number, resolution: 'continue' | 
 export const resolveDeferredAutomationTask = async (id: number, resolution: 'retry' | 'dismiss'): Promise<any> =>
   post(`/automation-pending-tasks/${id}/resolve`, { resolution });
 
+// 自动化规则日志
+export type AutomationAuditEventType =
+  | 'skipped'
+  | 'queued'
+  | 'run_started'
+  | 'action_succeeded'
+  | 'action_failed'
+  | 'run_finished';
+export type AutomationAuditStatus =
+  | 'skipped'
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'needs_review'
+  | 'canceled';
+
+export interface AutomationAuditEvent {
+  id: number;
+  cookie_id: string;
+  order_id: string;
+  item_id: string;
+  rule_id: number;
+  run_id: number;
+  trigger_type: string;
+  source: string;
+  event_type: AutomationAuditEventType;
+  status: AutomationAuditStatus;
+  action_type: string;
+  summary: string;
+  reason: string;
+  created_at: number;
+}
+
+export interface AutomationAuditQuery {
+  cookie_id?: string;
+  order_id?: string;
+  run_id?: number;
+  trigger_type?: string;
+  event_type?: AutomationAuditEventType;
+  status?: AutomationAuditStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export const getAutomationAuditEvents = async (query: AutomationAuditQuery = {}): Promise<{
+  items: AutomationAuditEvent[];
+  total: number;
+}> => {
+  const params: Record<string, string | number> = {};
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== '' && value !== null) params[key] = value;
+  });
+  const result = await get<any>('/automation-audit-events', params);
+  return {
+    items: Array.isArray(result?.items) ? result.items : [],
+    total: Number(result?.total || 0),
+  };
+};
+
 // Rules - 关键词回复规则 (使用关键词API)
 type KeywordRowPayload = {
     id: string;
     keyword: string;
+    expressions: string[];
+    match_type: 'contains' | 'regexp';
     reply: string;
     item_id: string;
     type: 'text' | 'image';
     image_url: string;
 };
 
-const normalizeKeywordRow = (item: any): KeywordRowPayload => ({
-    id: String(item?.id || ''),
-    keyword: item?.keyword || '',
-    reply: item?.reply || '',
-    item_id: item?.item_id || '',
-    type: item?.type === 'image' ? 'image' : 'text',
-    image_url: item?.image_url || '',
-});
+const normalizeKeywordRow = (item: any): KeywordRowPayload => {
+    const keyword = item?.keyword || '';
+    const expressions = Array.isArray(item?.expressions)
+        ? item.expressions.map((expression: unknown) => String(expression).trim()).filter(Boolean)
+        : [];
+    return {
+        id: String(item?.id || ''),
+        keyword,
+        expressions: expressions.length ? expressions : (keyword ? [keyword] : []),
+        match_type: item?.match_type === 'regexp' ? 'regexp' : 'contains',
+        reply: item?.reply || '',
+        item_id: item?.item_id || '',
+        type: item?.type === 'image' ? 'image' : 'text',
+        image_url: item?.image_url || '',
+    };
+};
 
 const getKeywordRowsWithType = async (cookieId: string): Promise<KeywordRowPayload[]> => {
     const existing = await get<any>(`/keywords-with-type/${cookieId}`);
@@ -1026,11 +1134,12 @@ const getKeywordRowsWithType = async (cookieId: string): Promise<KeywordRowPaylo
 export const getReplyRules = async (cookieId?: string): Promise<ReplyRule[]> => {
     if (!cookieId) return [];
     const keywords = await getKeywordRowsWithType(cookieId);
-	return keywords.map((item: any) => ({
+	return keywords.map((item: KeywordRowPayload) => ({
 		id: item.id,
         keyword: item.keyword || '',
+        expressions: item.expressions,
         reply_content: item.reply || '',
-        match_type: 'fuzzy' as const,
+        match_type: item.match_type,
         enabled: true,
         item_id: item.item_id || '',
         type: item.type === 'image' ? 'image' : 'text',
@@ -1040,8 +1149,13 @@ export const getReplyRules = async (cookieId?: string): Promise<ReplyRule[]> => 
 
 export const updateReplyRule = async (rule: Partial<ReplyRule>, cookieId: string): Promise<any> => {
 	const type = rule.type || 'text';
+	const expressions = (rule.expressions?.length ? rule.expressions : [rule.keyword || ''])
+		.map(expression => expression.trim())
+		.filter(Boolean);
 	const payload = {
-		keyword: rule.keyword || '',
+		keyword: expressions[0] || '',
+		expressions,
+		match_type: rule.match_type === 'regexp' ? 'regexp' : 'contains',
 		reply: type === 'text' ? (rule.reply_content || '') : '',
 		item_id: rule.item_id || '',
 		type,
@@ -1247,4 +1361,29 @@ export const deleteDefaultReply = async (cookieId: string): Promise<ApiResponse>
 
 export const clearDefaultReplyRecords = async (cookieId: string): Promise<ApiResponse> => {
   return post(`/api/default-reply/${cookieId}/clear-records`, {});
+};
+
+// 商品首次回复
+export const getItemGreetingRules = async (cookieId?: string): Promise<ItemGreetingRule[]> => {
+  const rules = await get<ItemGreetingRule[]>('/api/reply-rules/greetings', cookieId ? { cookie_id: cookieId } : undefined);
+  return (Array.isArray(rules) ? rules : []).map(rule => ({
+    ...rule,
+    item_ids: Array.isArray(rule.item_ids) ? rule.item_ids : [],
+  }));
+};
+
+export const createItemGreetingRule = async (input: ItemGreetingRuleInput): Promise<ItemGreetingRule> => {
+  return post('/api/reply-rules/greetings', input);
+};
+
+export const updateItemGreetingRule = async (id: number, input: ItemGreetingRuleInput): Promise<ItemGreetingRule> => {
+  return put(`/api/reply-rules/greetings/${id}`, input);
+};
+
+export const deleteItemGreetingRule = async (id: number): Promise<ApiResponse> => {
+  return del(`/api/reply-rules/greetings/${id}`);
+};
+
+export const clearItemGreetingRecords = async (cookieId: string): Promise<ApiResponse> => {
+  return post(`/api/reply-rules/greetings/records/${cookieId}/clear`, {});
 };
