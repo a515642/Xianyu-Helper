@@ -2,15 +2,55 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
 )
+
+const (
+	// maxKeywordExpressions 限制单条规则可保存的表达式数量。
+	maxKeywordExpressions = 50
+	// maxKeywordExpressionLength 限制单个表达式的字符数，避免异常大的正则拖慢匹配。
+	maxKeywordExpressionLength = 500
+)
+
+// normalizeKeywordInput 校验并规整关键词规则输入，返回可直接持久化的字段。
+// keyword 为历史单表达式字段，最终会与 expressions 的首项保持一致。
+func normalizeKeywordInput(keyword string, expressions []string, matchType string) (string, []string, string, error) {
+	rawMatchType := strings.ToLower(strings.TrimSpace(matchType))
+	switch rawMatchType {
+	case "", "contains", "regexp", "exact", "fuzzy":
+	default:
+		return "", nil, "", errors.New("匹配模式必须是 contains 或 regexp")
+	}
+	normalizedType := db.NormalizeKeywordMatchType(rawMatchType)
+	normalized := db.NormalizeKeywordExpressions(expressions, strings.TrimSpace(keyword))
+	if len(normalized) == 0 {
+		return "", nil, "", errors.New("关键词或匹配表达式不能为空")
+	}
+	if len(normalized) > maxKeywordExpressions {
+		return "", nil, "", fmt.Errorf("匹配表达式不能超过 %d 条", maxKeywordExpressions)
+	}
+	for index, expression := range normalized {
+		if utf8.RuneCountInString(expression) > maxKeywordExpressionLength {
+			return "", nil, "", fmt.Errorf("第 %d 条匹配表达式不能超过 %d 个字符", index+1, maxKeywordExpressionLength)
+		}
+		if normalizedType == "regexp" {
+			if _, err := regexp.Compile("(?i:" + expression + ")"); err != nil {
+				return "", nil, "", fmt.Errorf("第 %d 条正则表达式无效", index+1)
+			}
+		}
+	}
+	return normalized[0], normalized, normalizedType, nil
+}
 
 // mountKeywordsReal 关键字端点。
 func (s *Server) mountKeywordsReal(r chi.Router) {
@@ -73,6 +113,7 @@ func (s *Server) listKeywordsWithType(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": k.ID, "keyword": k.Keyword, "reply": k.Reply, "item_id": k.ItemID,
 			"type": k.Type, "image_url": k.ImageURL,
+			"expressions": k.Expressions, "match_type": k.MatchType,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -108,17 +149,21 @@ func (s *Server) addKeywordWithItemID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Keyword  string `json:"keyword"`
-		Reply    string `json:"reply"`
-		ItemID   string `json:"item_id"`
-		Type     string `json:"type"`
-		ImageURL string `json:"image_url"`
-		Keywords *[]struct {
-			Keyword  string `json:"keyword"`
-			Reply    string `json:"reply"`
-			ItemID   string `json:"item_id"`
-			Type     string `json:"type"`
-			ImageURL string `json:"image_url"`
+		Keyword     string   `json:"keyword"`
+		Reply       string   `json:"reply"`
+		ItemID      string   `json:"item_id"`
+		Type        string   `json:"type"`
+		ImageURL    string   `json:"image_url"`
+		Expressions []string `json:"expressions"`
+		MatchType   string   `json:"match_type"`
+		Keywords    *[]struct {
+			Keyword     string   `json:"keyword"`
+			Reply       string   `json:"reply"`
+			ItemID      string   `json:"item_id"`
+			Type        string   `json:"type"`
+			ImageURL    string   `json:"image_url"`
+			Expressions []string `json:"expressions"`
+			MatchType   string   `json:"match_type"`
 		} `json:"keywords"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
@@ -128,8 +173,9 @@ func (s *Server) addKeywordWithItemID(w http.ResponseWriter, r *http.Request) {
 	if req.Keywords != nil {
 		rows := make([]db.KeywordRow, 0, len(*req.Keywords))
 		for _, item := range *req.Keywords {
-			if strings.TrimSpace(item.Keyword) == "" {
-				writeErr(w, http.StatusBadRequest, "keyword 必填")
+			keyword, expressions, matchType, err := normalizeKeywordInput(item.Keyword, item.Expressions, item.MatchType)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			item.Type = strings.ToLower(strings.TrimSpace(item.Type))
@@ -154,12 +200,14 @@ func (s *Server) addKeywordWithItemID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			rows = append(rows, db.KeywordRow{
-				CookieID: cid,
-				Keyword:  item.Keyword,
-				Reply:    item.Reply,
-				ItemID:   item.ItemID,
-				Type:     item.Type,
-				ImageURL: item.ImageURL,
+				CookieID:    cid,
+				Keyword:     keyword,
+				Reply:       item.Reply,
+				ItemID:      item.ItemID,
+				Type:        item.Type,
+				ImageURL:    item.ImageURL,
+				Expressions: expressions,
+				MatchType:   matchType,
 			})
 		}
 		if err := s.Store.Keywords.ReplaceForCookie(r.Context(), cid, rows); err != nil {
@@ -169,8 +217,9 @@ func (s *Server) addKeywordWithItemID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
-	if strings.TrimSpace(req.Keyword) == "" {
-		writeErr(w, http.StatusBadRequest, "keyword 必填")
+	keyword, expressions, matchType, err := normalizeKeywordInput(req.Keyword, req.Expressions, req.MatchType)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
@@ -194,7 +243,10 @@ func (s *Server) addKeywordWithItemID(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.ImageURL = ""
 	}
-	id, err := s.Store.Keywords.Add(r.Context(), cid, req.Keyword, req.Reply, req.ItemID, req.Type, req.ImageURL)
+	id, err := s.Store.Keywords.AddRow(r.Context(), db.KeywordRow{
+		CookieID: cid, Keyword: keyword, Reply: req.Reply, ItemID: req.ItemID,
+		Type: req.Type, ImageURL: req.ImageURL, Expressions: expressions, MatchType: matchType,
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "添加失败")
 		return
@@ -213,14 +265,21 @@ func (s *Server) updateKeywordByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Keyword  string `json:"keyword"`
-		Reply    string `json:"reply"`
-		ItemID   string `json:"item_id"`
-		Type     string `json:"type"`
-		ImageURL string `json:"image_url"`
+		Keyword     string   `json:"keyword"`
+		Reply       string   `json:"reply"`
+		ItemID      string   `json:"item_id"`
+		Type        string   `json:"type"`
+		ImageURL    string   `json:"image_url"`
+		Expressions []string `json:"expressions"`
+		MatchType   string   `json:"match_type"`
 	}
-	if err := decodeJSON(r, &req); err != nil || strings.TrimSpace(req.Keyword) == "" {
-		writeErr(w, http.StatusBadRequest, "keyword 必填")
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	keyword, expressions, matchType, err := normalizeKeywordInput(req.Keyword, req.Expressions, req.MatchType)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
@@ -245,8 +304,9 @@ func (s *Server) updateKeywordByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = s.Store.Keywords.UpdateByID(r.Context(), db.KeywordRow{
-		ID: id, CookieID: cid, Keyword: req.Keyword, Reply: req.Reply,
+		ID: id, CookieID: cid, Keyword: keyword, Reply: req.Reply,
 		ItemID: req.ItemID, Type: req.Type, ImageURL: req.ImageURL,
+		Expressions: expressions, MatchType: matchType,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {

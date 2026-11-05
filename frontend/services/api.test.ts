@@ -552,8 +552,9 @@ test('getReplyRules labels keyword matching according to engine contains behavio
   expect(rules[0]).toMatchObject({
     id: '42',
     keyword: '发货',
+    expressions: ['发货'],
     reply_content: '马上安排',
-    match_type: 'fuzzy',
+    match_type: 'contains',
     type: 'image',
     image_url: 'https://img.example/reply.png',
   });
@@ -571,7 +572,8 @@ test('updateReplyRule preserves keyword image metadata when saving text edits', 
     credentials: 'include',
   }));
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-    keyword: '发货', reply: '稍后安排', item_id: 'item-1', type: 'text', image_url: '',
+    keyword: '发货', expressions: ['发货'], match_type: 'contains',
+    reply: '稍后安排', item_id: 'item-1', type: 'text', image_url: '',
   });
 });
 
@@ -581,7 +583,8 @@ test('updateReplyRule clears stale content when switching reply type', async () 
 
   await updateReplyRule({ id: '42', keyword: '发货', type: 'image', image_url: 'https://img.example/new.png' }, 'acc1');
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-    keyword: '发货', reply: '', item_id: '', type: 'image', image_url: 'https://img.example/new.png',
+    keyword: '发货', expressions: ['发货'], match_type: 'contains',
+    reply: '', item_id: '', type: 'image', image_url: 'https://img.example/new.png',
   });
 });
 

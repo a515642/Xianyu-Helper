@@ -353,8 +353,10 @@ export interface ShippingVariant {
 export interface ReplyRule {
   id: string;
   keyword: string;
+  /** 匹配表达式集合；每行一个，任意命中即回复。旧数据回退到 keyword。 */
+  expressions?: string[];
   reply_content: string;
-  match_type: 'exact' | 'fuzzy';
+  match_type: 'contains' | 'regexp';
   enabled: boolean;
   item_id?: string;
   type?: 'text' | 'image';

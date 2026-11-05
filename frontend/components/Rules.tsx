@@ -814,11 +814,12 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     }
     setEditingReplyRule({
       keyword: '',
+      expressions: [],
       reply_content: '',
       image_url: '',
       item_id: '',
       type: 'text',
-      match_type: 'fuzzy',
+      match_type: 'contains',
       enabled: true,
     });
     setShowReplyModal(true);
@@ -829,12 +830,23 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     const hasReplyContent = editingReplyRule.type === 'image'
       ? Boolean(editingReplyRule.image_url?.trim())
       : Boolean(editingReplyRule.reply_content?.trim());
-    if (!editingReplyRule.keyword?.trim() || !hasReplyContent) {
-      alert('请填写关键词和回复内容');
+    const expressions = (editingReplyRule.expressions?.length
+      ? editingReplyRule.expressions
+      : [editingReplyRule.keyword || ''])
+      .map(expression => expression.trim())
+      .filter(Boolean);
+    if (expressions.length === 0 || !hasReplyContent) {
+      alert('请填写匹配表达式和回复内容');
       return;
     }
     try {
-      await updateReplyRule({ ...editingReplyRule, match_type: 'fuzzy', enabled: true }, selectedAccountId);
+      await updateReplyRule({
+        ...editingReplyRule,
+        keyword: expressions[0],
+        expressions,
+        match_type: editingReplyRule.match_type || 'contains',
+        enabled: true,
+      }, selectedAccountId);
       setShowReplyModal(false);
       await loadReplyRules();
       alert('保存成功');
@@ -1375,8 +1387,12 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
               <div key={rule.id} className="flex flex-col md:flex-row md:items-center justify-between p-5 rounded-2xl border border-gray-100 bg-surface-subtle hover:bg-white hover:shadow-lg transition-all gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-3 mb-2">
-                    <span className="px-3 py-1 bg-black text-white rounded-lg text-xs font-bold">包含匹配</span>
-                    <h3 className="font-bold text-gray-900">“{rule.keyword}”</h3>
+                    <span className="px-3 py-1 bg-black text-white rounded-lg text-xs font-bold">
+                      {rule.match_type === 'regexp' ? '正则匹配' : '包含匹配'}
+                    </span>
+                    <h3 className="font-bold text-gray-900">
+                      “{(rule.expressions?.length ? rule.expressions : [rule.keyword]).filter(Boolean).join(' / ')}”
+                    </h3>
                   </div>
                   <div className="bg-white p-3 rounded-xl border border-gray-100 text-sm text-gray-600 leading-relaxed">
                     {rule.type === 'image' && rule.image_url ? rule.image_url : rule.reply_content}
@@ -1986,7 +2002,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
             </div>
 
             <div className="modal-body space-y-5">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-bold text-gray-700 mb-2">关联商品</label>
                   <select
@@ -2019,16 +2035,41 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                     <option value="image">图片</option>
                   </select>
                 </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">匹配模式</label>
+                  <select
+                    value={editingReplyRule.match_type || 'contains'}
+                    onChange={event => setEditingReplyRule({
+                      ...editingReplyRule,
+                      match_type: event.target.value as 'contains' | 'regexp',
+                    })}
+                    className="w-full ios-input px-4 py-3 rounded-xl"
+                  >
+                    <option value="contains">包含匹配</option>
+                    <option value="regexp">正则匹配</option>
+                  </select>
+                </div>
               </div>
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">关键词</label>
-                <input
-                  type="text"
-                  value={editingReplyRule.keyword || ''}
-                  onChange={event => setEditingReplyRule({ ...editingReplyRule, keyword: event.target.value })}
-                  placeholder="买家发送的关键词"
-                  className="w-full ios-input px-4 py-3 rounded-xl"
+                <label className="block text-sm font-bold text-gray-700 mb-2">匹配表达式</label>
+                <textarea
+                  value={(editingReplyRule.expressions?.length
+                    ? editingReplyRule.expressions
+                    : [editingReplyRule.keyword || '']).join('\n')}
+                  onChange={event => {
+                    const lines = event.target.value.split('\n');
+                    setEditingReplyRule({
+                      ...editingReplyRule,
+                      expressions: lines,
+                      keyword: lines[0] || '',
+                    });
+                  }}
+                  placeholder={'每行一个表达式，任意一行命中即回复\n例如：发货|快递\n或正则：订单\\d+'}
+                  className="w-full ios-input px-4 py-3 rounded-xl h-28 resize-none"
                 />
+                <p className="mt-2 text-xs text-gray-400">
+                  包含模式按字面文本匹配；正则模式使用 RE2 语法，默认忽略大小写。
+                </p>
               </div>
 
               {editingReplyRule.type === 'image' ? (

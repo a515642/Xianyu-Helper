@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -266,23 +267,53 @@ func (r *ReplyService) keywordReply(ctx context.Context, m ChatMessage) *ReplyRe
 	if err != nil || len(kws) == 0 {
 		return nil
 	}
-	msgLower := strings.ToLower(m.Text)
-
 	// 1. 商品ID关键词优先。
 	if m.ItemID != "" {
 		for _, kw := range kws {
-			if kw.ItemID == m.ItemID && strings.Contains(msgLower, strings.ToLower(kw.Keyword)) {
+			if kw.ItemID == m.ItemID && r.keywordMatches(kw, m.Text) {
 				return r.keywordResult(kw, m)
 			}
 		}
 	}
 	// 2. 通用关键词（无 item_id）。
 	for _, kw := range kws {
-		if kw.ItemID == "" && strings.Contains(msgLower, strings.ToLower(kw.Keyword)) {
+		if kw.ItemID == "" && r.keywordMatches(kw, m.Text) {
 			return r.keywordResult(kw, m)
 		}
 	}
 	return nil
+}
+
+// keywordMatches 判断规则表达式是否命中消息文本。
+// contains 模式保持不区分大小写的字面包含；regexp 模式使用 Go/RE2，
+// 默认大小写不敏感。单个非法正则只记录并跳过，不影响同规则其他表达式。
+func (r *ReplyService) keywordMatches(kw db.Keyword, text string) bool {
+	expressions := kw.Expressions
+	if len(expressions) == 0 && strings.TrimSpace(kw.Keyword) != "" {
+		expressions = []string{kw.Keyword}
+	}
+	matchType := db.NormalizeKeywordMatchType(kw.MatchType)
+	for index, rawExpression := range expressions {
+		expression := strings.TrimSpace(rawExpression)
+		if expression == "" {
+			continue
+		}
+		if matchType == "regexp" {
+			compiled, err := regexp.Compile("(?i:" + expression + ")")
+			if err != nil {
+				r.logger.Warn("关键词正则编译失败，已跳过", "expression_index", index, "error_type", "regexp_compile")
+				continue
+			}
+			if compiled.MatchString(text) {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(strings.ToLower(text), strings.ToLower(expression)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *ReplyService) keywordResult(kw db.Keyword, m ChatMessage) *ReplyResult {

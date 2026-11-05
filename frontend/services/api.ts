@@ -1003,20 +1003,30 @@ export const resolveDeferredAutomationTask = async (id: number, resolution: 'ret
 type KeywordRowPayload = {
     id: string;
     keyword: string;
+    expressions: string[];
+    match_type: 'contains' | 'regexp';
     reply: string;
     item_id: string;
     type: 'text' | 'image';
     image_url: string;
 };
 
-const normalizeKeywordRow = (item: any): KeywordRowPayload => ({
-    id: String(item?.id || ''),
-    keyword: item?.keyword || '',
-    reply: item?.reply || '',
-    item_id: item?.item_id || '',
-    type: item?.type === 'image' ? 'image' : 'text',
-    image_url: item?.image_url || '',
-});
+const normalizeKeywordRow = (item: any): KeywordRowPayload => {
+    const keyword = item?.keyword || '';
+    const expressions = Array.isArray(item?.expressions)
+        ? item.expressions.map((expression: unknown) => String(expression).trim()).filter(Boolean)
+        : [];
+    return {
+        id: String(item?.id || ''),
+        keyword,
+        expressions: expressions.length ? expressions : (keyword ? [keyword] : []),
+        match_type: item?.match_type === 'regexp' ? 'regexp' : 'contains',
+        reply: item?.reply || '',
+        item_id: item?.item_id || '',
+        type: item?.type === 'image' ? 'image' : 'text',
+        image_url: item?.image_url || '',
+    };
+};
 
 const getKeywordRowsWithType = async (cookieId: string): Promise<KeywordRowPayload[]> => {
     const existing = await get<any>(`/keywords-with-type/${cookieId}`);
@@ -1026,11 +1036,12 @@ const getKeywordRowsWithType = async (cookieId: string): Promise<KeywordRowPaylo
 export const getReplyRules = async (cookieId?: string): Promise<ReplyRule[]> => {
     if (!cookieId) return [];
     const keywords = await getKeywordRowsWithType(cookieId);
-	return keywords.map((item: any) => ({
+	return keywords.map((item: KeywordRowPayload) => ({
 		id: item.id,
         keyword: item.keyword || '',
+        expressions: item.expressions,
         reply_content: item.reply || '',
-        match_type: 'fuzzy' as const,
+        match_type: item.match_type,
         enabled: true,
         item_id: item.item_id || '',
         type: item.type === 'image' ? 'image' : 'text',
@@ -1040,8 +1051,13 @@ export const getReplyRules = async (cookieId?: string): Promise<ReplyRule[]> => 
 
 export const updateReplyRule = async (rule: Partial<ReplyRule>, cookieId: string): Promise<any> => {
 	const type = rule.type || 'text';
+	const expressions = (rule.expressions?.length ? rule.expressions : [rule.keyword || ''])
+		.map(expression => expression.trim())
+		.filter(Boolean);
 	const payload = {
-		keyword: rule.keyword || '',
+		keyword: expressions[0] || '',
+		expressions,
+		match_type: rule.match_type === 'regexp' ? 'regexp' : 'contains',
 		reply: type === 'text' ? (rule.reply_content || '') : '',
 		item_id: rule.item_id || '',
 		type,

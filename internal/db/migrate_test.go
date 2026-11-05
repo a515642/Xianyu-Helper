@@ -134,8 +134,8 @@ func TestLatestMigrationsDownUpSQLite(t *testing.T) {
 	goose.SetBaseFS(migrationsFS)
 	// 依次回滚最新版本到 13，再整体升级。00029/00030 是聊天已读，
 	// 00034 是发货模板迁移，00036 是卡密条目迁移，00042 是商品首次回复，
-	// 因此需要额外回滚五次才能到达原有的 migration 14 检查点。
-	for i := 0; i < 29; i++ {
+	// 00043 是关键词表达式，因此需要额外回滚六次才能到达原有的 migration 14 检查点。
+	for i := 0; i < 30; i++ {
 		if err := goose.Down(d, "migrations/sqlite"); err != nil {
 			t.Fatalf("down migration #%d: %v", i+1, err)
 		}

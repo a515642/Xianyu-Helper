@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,67 @@ type Keyword struct {
 	ItemID   string
 	Type     string // text/image
 	ImageURL string
+	// Expressions 是规则的匹配表达式集合；旧数据为空时回退到 Keyword。
+	Expressions []string
+	// MatchType 是 contains 或 regexp；旧数据缺失时回退为 contains。
+	MatchType string
+}
+
+// NormalizeKeywordMatchType 把历史/空匹配模式规整为 contains 或 regexp。
+// exact/fuzzy 是旧前端的占位值，统一按 contains 处理。
+func NormalizeKeywordMatchType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "regexp":
+		return "regexp"
+	default:
+		return "contains"
+	}
+}
+
+// NormalizeKeywordExpressions 去空白、去重并丢弃空表达式。
+// expressions 为空时回退到单关键词 keyword，保持历史规则可用。
+func NormalizeKeywordExpressions(expressions []string, keyword string) []string {
+	out := make([]string, 0, len(expressions)+1)
+	seen := make(map[string]struct{}, len(expressions)+1)
+	add := func(expression string) {
+		expression = strings.TrimSpace(expression)
+		if expression == "" {
+			return
+		}
+		if _, exists := seen[expression]; exists {
+			return
+		}
+		seen[expression] = struct{}{}
+		out = append(out, expression)
+	}
+	for _, expression := range expressions {
+		add(expression)
+	}
+	if len(out) == 0 {
+		add(keyword)
+	}
+	return out
+}
+
+// EncodeKeywordExpressions 把表达式集合编码为数据库文本；空集合返回空串。
+func EncodeKeywordExpressions(expressions []string) string {
+	if len(expressions) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(expressions)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeKeywordExpressions 解析数据库中的表达式 JSON；非法或空数据回退首关键词。
+func decodeKeywordExpressions(raw, keyword string) []string {
+	var decoded []string
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &decoded)
+	}
+	return NormalizeKeywordExpressions(decoded, keyword)
 }
 
 // DefaultReply 对应 default_replies 表。
@@ -47,7 +110,8 @@ type Keywords struct {
 // AllWithType 取某账号所有关键字（含类型/图片）。
 func (k *Keywords) AllWithType(ctx context.Context, cookieID string) ([]Keyword, error) {
 	rows, err := k.DB.QueryContext(ctx,
-		`SELECT keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,'')
+		`SELECT keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,''),
+		        COALESCE(keyword_expressions,''), COALESCE(match_type,'contains')
 			 FROM keywords WHERE cookie_id=? ORDER BY LENGTH(keyword) DESC,id ASC`, cookieID)
 	if err != nil {
 		return nil, err
@@ -56,9 +120,13 @@ func (k *Keywords) AllWithType(ctx context.Context, cookieID string) ([]Keyword,
 	var out []Keyword
 	for rows.Next() {
 		var kw Keyword
-		if err := rows.Scan(&kw.Keyword, &kw.Reply, &kw.ItemID, &kw.Type, &kw.ImageURL); err != nil {
+		var rawExpressions string
+		if err := rows.Scan(&kw.Keyword, &kw.Reply, &kw.ItemID, &kw.Type, &kw.ImageURL,
+			&rawExpressions, &kw.MatchType); err != nil {
 			return nil, err
 		}
+		kw.Expressions = decodeKeywordExpressions(rawExpressions, kw.Keyword)
+		kw.MatchType = NormalizeKeywordMatchType(kw.MatchType)
 		out = append(out, kw)
 	}
 	return out, rows.Err()

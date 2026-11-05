@@ -12,13 +12,15 @@ import (
 
 // KeywordRow keywords 表完整行（含自增 id，用于按索引删除）。
 type KeywordRow struct {
-	ID       int64 `json:"id"`
-	CookieID string
-	Keyword  string
-	Reply    string
-	ItemID   string
-	Type     string
-	ImageURL string
+	ID          int64 `json:"id"`
+	CookieID    string
+	Keyword     string
+	Reply       string
+	ItemID      string
+	Type        string
+	ImageURL    string
+	Expressions []string
+	MatchType   string
 }
 
 func (k *Keywords) UpdateByID(ctx context.Context, row KeywordRow) error {
@@ -26,10 +28,17 @@ func (k *Keywords) UpdateByID(ctx context.Context, row KeywordRow) error {
 	if kwType == "" {
 		kwType = "text"
 	}
+	expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+	keyword := row.Keyword
+	if len(expressions) > 0 {
+		keyword = expressions[0]
+	}
 	res, err := k.DB.ExecContext(ctx, `UPDATE keywords
-		SET keyword=?,reply=?,item_id=?,type=?,image_url=?
+		SET keyword=?,reply=?,item_id=?,type=?,image_url=?,keyword_expressions=?,match_type=?
 		WHERE id=? AND cookie_id=?`,
-		row.Keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL), row.ID, row.CookieID)
+		keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+		nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType),
+		row.ID, row.CookieID)
 	if err != nil {
 		return err
 	}
@@ -53,7 +62,8 @@ func (k *Keywords) DeleteByID(ctx context.Context, cookieID string, id int64) er
 // AllRows 取某账号所有关键字（含 id）。
 func (k *Keywords) AllRows(ctx context.Context, cookieID string) ([]KeywordRow, error) {
 	rows, err := k.DB.QueryContext(ctx,
-		`SELECT id, keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,'')
+		`SELECT id, keyword, reply, COALESCE(item_id,''), COALESCE(type,'text'), COALESCE(image_url,''),
+		        COALESCE(keyword_expressions,''), COALESCE(match_type,'contains')
 		 FROM keywords WHERE cookie_id=? ORDER BY id`, cookieID)
 	if err != nil {
 		return nil, err
@@ -62,23 +72,43 @@ func (k *Keywords) AllRows(ctx context.Context, cookieID string) ([]KeywordRow, 
 	var out []KeywordRow
 	for rows.Next() {
 		var r KeywordRow
-		if err := rows.Scan(&r.ID, &r.Keyword, &r.Reply, &r.ItemID, &r.Type, &r.ImageURL); err != nil {
+		var rawExpressions string
+		if err := rows.Scan(&r.ID, &r.Keyword, &r.Reply, &r.ItemID, &r.Type, &r.ImageURL,
+			&rawExpressions, &r.MatchType); err != nil {
 			return nil, err
 		}
 		r.CookieID = cookieID
+		r.Expressions = decodeKeywordExpressions(rawExpressions, r.Keyword)
+		r.MatchType = NormalizeKeywordMatchType(r.MatchType)
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
-// Add 添加关键字。
+// Add 添加单表达式关键字，保持历史调用方的包含匹配语义。
 func (k *Keywords) Add(ctx context.Context, cookieID, keyword, reply, itemID, kwType, imageURL string) (int64, error) {
+	return k.AddRow(ctx, KeywordRow{
+		CookieID: cookieID, Keyword: keyword, Reply: reply, ItemID: itemID,
+		Type: kwType, ImageURL: imageURL,
+	})
+}
+
+// AddRow 添加带表达式集合和匹配模式的关键字行。
+func (k *Keywords) AddRow(ctx context.Context, row KeywordRow) (int64, error) {
+	kwType := row.Type
 	if kwType == "" {
 		kwType = "text"
 	}
+	expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+	keyword := row.Keyword
+	if len(expressions) > 0 {
+		keyword = expressions[0]
+	}
 	return insertReturningID(ctx, k.DB, k.Dialect,
-		`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url) VALUES (?,?,?,?,?,?)`,
-		cookieID, keyword, reply, nullable(itemID), kwType, nullable(imageURL))
+		`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url, keyword_expressions, match_type)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		row.CookieID, keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+		nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType))
 }
 
 // ReplaceForCookie 覆盖某账号的全部关键词。
@@ -96,9 +126,16 @@ func (k *Keywords) ReplaceForCookie(ctx context.Context, cookieID string, rows [
 		if kwType == "" {
 			kwType = "text"
 		}
+		expressions := NormalizeKeywordExpressions(row.Expressions, row.Keyword)
+		keyword := row.Keyword
+		if len(expressions) > 0 {
+			keyword = expressions[0]
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url) VALUES (?,?,?,?,?,?)`,
-			cookieID, row.Keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL)); err != nil {
+			`INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, image_url, keyword_expressions, match_type)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			cookieID, keyword, row.Reply, nullable(row.ItemID), kwType, nullable(row.ImageURL),
+			nullable(EncodeKeywordExpressions(expressions)), NormalizeKeywordMatchType(row.MatchType)); err != nil {
 			return err
 		}
 	}
