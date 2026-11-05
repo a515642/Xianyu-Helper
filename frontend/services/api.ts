@@ -2,7 +2,7 @@ import { get, post, put, del, postForm, type RequestControlOptions } from '../re
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, SystemSettings, ApiResponse, OrderAnalytics,
-  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
+  Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, ItemGreetingRule, ItemGreetingRuleInput, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
@@ -1247,4 +1247,29 @@ export const deleteDefaultReply = async (cookieId: string): Promise<ApiResponse>
 
 export const clearDefaultReplyRecords = async (cookieId: string): Promise<ApiResponse> => {
   return post(`/api/default-reply/${cookieId}/clear-records`, {});
+};
+
+// 商品首次回复
+export const getItemGreetingRules = async (cookieId?: string): Promise<ItemGreetingRule[]> => {
+  const rules = await get<ItemGreetingRule[]>('/api/reply-rules/greetings', cookieId ? { cookie_id: cookieId } : undefined);
+  return (Array.isArray(rules) ? rules : []).map(rule => ({
+    ...rule,
+    item_ids: Array.isArray(rule.item_ids) ? rule.item_ids : [],
+  }));
+};
+
+export const createItemGreetingRule = async (input: ItemGreetingRuleInput): Promise<ItemGreetingRule> => {
+  return post('/api/reply-rules/greetings', input);
+};
+
+export const updateItemGreetingRule = async (id: number, input: ItemGreetingRuleInput): Promise<ItemGreetingRule> => {
+  return put(`/api/reply-rules/greetings/${id}`, input);
+};
+
+export const deleteItemGreetingRule = async (id: number): Promise<ApiResponse> => {
+  return del(`/api/reply-rules/greetings/${id}`);
+};
+
+export const clearItemGreetingRecords = async (cookieId: string): Promise<ApiResponse> => {
+  return post(`/api/reply-rules/greetings/records/${cookieId}/clear`, {});
 };

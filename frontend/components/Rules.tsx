@@ -8,13 +8,18 @@ import {
   DeliveryTemplate,
   DefaultReply,
   Item,
+  ItemGreetingRule,
+  ItemGreetingRuleInput,
   ReplyRule,
   ShippingRule,
   ShippingVariant,
 } from '../types';
 import {
   clearDefaultReplyRecords,
+  clearItemGreetingRecords,
+  createItemGreetingRule,
   deleteDefaultReply,
+  deleteItemGreetingRule,
   deleteReplyRule,
   deleteShippingRule,
   getAccountDetails,
@@ -22,6 +27,7 @@ import {
   getDeliveryTemplates,
   getDefaultReplies,
   getDefaultReply,
+  getItemGreetingRules,
   getItems,
   getAutomationIssues,
   getReplyRules,
@@ -29,6 +35,7 @@ import {
   getShippingRulesPage,
   applyShippingRuleToItems,
   updateDefaultReply,
+  updateItemGreetingRule,
   updateReplyRule,
   updateShippingRule,
   resolveAutomationRun,
@@ -65,7 +72,7 @@ import {
 } from './automationIssueState';
 import { commitIfLatest } from './latestRequest';
 
-type RulesTab = 'automation' | 'reply' | 'default';
+type RulesTab = 'automation' | 'reply' | 'default' | 'greetings';
 type DeliveryScope = 'account' | 'items';
 
 interface RulesProps {
@@ -84,6 +91,20 @@ interface DefaultReplyForm {
   reply_once: boolean;
   reply_image_url: string;
 }
+
+// 商品首次回复表单；id 为空表示新建。
+interface ItemGreetingForm extends ItemGreetingRuleInput {
+  id?: number;
+}
+
+const emptyItemGreetingForm = (cookieID = ''): ItemGreetingForm => ({
+  cookie_id: cookieID,
+  name: '',
+  enabled: true,
+  reply_content: '',
+  reply_image_url: '',
+  item_ids: [],
+});
 
 interface TriggerMeta {
   label: string;
@@ -237,6 +258,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const [automationIssues, setAutomationIssues] = useState<{ runs: AutomationRunIssue[]; pending_tasks: DeferredAutomationIssue[] }>({ runs: [], pending_tasks: [] });
   const [replyRules, setReplyRules] = useState<ReplyRule[]>([]);
   const [defaultReplies, setDefaultReplies] = useState<Record<string, DefaultReply>>({});
+  const [greetingRules, setGreetingRules] = useState<ItemGreetingRule[]>([]);
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [deliveryTemplates, setDeliveryTemplates] = useState<DeliveryTemplate[]>([]);
@@ -260,6 +282,8 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const [showAutomationModal, setShowAutomationModal] = useState(false);
   const [showReplyModal, setShowReplyModal] = useState(false);
   const [showDefaultModal, setShowDefaultModal] = useState(false);
+  const [showGreetingModal, setShowGreetingModal] = useState(false);
+  const [greetingForm, setGreetingForm] = useState<ItemGreetingForm>(() => emptyItemGreetingForm());
   const [editingAutomationRule, setEditingAutomationRule] = useState<Partial<ShippingRule> | null>(null);
   const [deliveryScope, setDeliveryScope] = useState<DeliveryScope>('items');
   const [selectedDeliveryItemIds, setSelectedDeliveryItemIds] = useState<string[]>([]);
@@ -331,6 +355,10 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     setDefaultReplies(await getDefaultReplies());
   }, []);
 
+  const loadGreetingRules = useCallback(async () => {
+    setGreetingRules(await getItemGreetingRules(selectedAccountId || undefined));
+  }, [selectedAccountId]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -338,13 +366,15 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
         await loadAutomationRules();
       } else if (activeTab === 'reply') {
         await loadReplyRules();
+      } else if (activeTab === 'greetings') {
+        await loadGreetingRules();
       } else {
         await loadDefaultReplies();
       }
     } finally {
       setLoading(false);
     }
-  }, [activeTab, loadAutomationRules, loadDefaultReplies, loadReplyRules]);
+  }, [activeTab, loadAutomationRules, loadDefaultReplies, loadGreetingRules, loadReplyRules]);
 
   useEffect(() => {
 	const timer = window.setTimeout(() => {
@@ -375,6 +405,17 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   const visibleDefaultAccounts = useMemo(
     () => accounts.filter(account => !selectedAccountId || account.id === selectedAccountId),
     [accounts, selectedAccountId],
+  );
+
+  const visibleGreetingRules = useMemo(
+    () => greetingRules.filter(rule => !selectedAccountId || rule.cookie_id === selectedAccountId),
+    [greetingRules, selectedAccountId],
+  );
+
+  // greetingItems 是当前账号下可选的商品列表，供首次回复规则勾选。
+  const greetingItems = useMemo(
+    () => items.filter(item => item.cookie_id === greetingForm.cookie_id),
+    [items, greetingForm.cookie_id],
   );
 
   const automationPageNumbers = useMemo(() => {
@@ -884,11 +925,96 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
     }
   };
 
+  const openGreetingModal = (rule?: ItemGreetingRule) => {
+    if (rule) {
+      setGreetingForm({
+        id: rule.id,
+        cookie_id: rule.cookie_id,
+        name: rule.name,
+        enabled: rule.enabled,
+        reply_content: rule.reply_content,
+        reply_image_url: rule.reply_image_url,
+        item_ids: rule.item_ids,
+      });
+    } else {
+      const cookieID = selectedAccountId || accounts[0]?.id || '';
+      setGreetingForm(emptyItemGreetingForm(cookieID));
+    }
+    setShowGreetingModal(true);
+  };
+
+  const toggleGreetingItem = (itemID: string) => {
+    setGreetingForm(current => ({
+      ...current,
+      item_ids: current.item_ids.includes(itemID)
+        ? current.item_ids.filter(id => id !== itemID)
+        : [...current.item_ids, itemID],
+    }));
+  };
+
+  const handleSaveGreetingRule = async () => {
+    if (!greetingForm.cookie_id) {
+      alert('请先选择账号');
+      return;
+    }
+    if (!greetingForm.item_ids.length) {
+      alert('请至少选择一个商品');
+      return;
+    }
+    if (!greetingForm.reply_content.trim() && !greetingForm.reply_image_url.trim()) {
+      alert('请填写回复文字或图片 URL');
+      return;
+    }
+    const payload: ItemGreetingRuleInput = {
+      cookie_id: greetingForm.cookie_id,
+      name: greetingForm.name,
+      enabled: greetingForm.enabled,
+      reply_content: greetingForm.reply_content,
+      reply_image_url: greetingForm.reply_image_url,
+      item_ids: greetingForm.item_ids,
+    };
+    try {
+      if (greetingForm.id) {
+        await updateItemGreetingRule(greetingForm.id, payload);
+      } else {
+        await createItemGreetingRule(payload);
+      }
+      setShowGreetingModal(false);
+      await loadGreetingRules();
+      alert('保存成功');
+    } catch (error) {
+      alert('保存失败：' + (error as Error).message);
+    }
+  };
+
+  const handleDeleteGreetingRule = async (rule: ItemGreetingRule) => {
+    if (!confirm(`确定删除首次回复规则“${rule.name || rule.item_ids[0] || rule.id}”吗？`)) return;
+    try {
+      await deleteItemGreetingRule(rule.id);
+      await loadGreetingRules();
+      alert('删除成功');
+    } catch (error) {
+      alert('删除失败：' + (error as Error).message);
+    }
+  };
+
+  const handleClearGreetingRecords = async (cookieID: string) => {
+    if (!confirm('确定清空该账号的商品首次回复记录吗？清空后买家再次咨询会重新触发首次回复。')) return;
+    try {
+      await clearItemGreetingRecords(cookieID);
+      alert('清空成功');
+    } catch (error) {
+      alert('清空失败：' + (error as Error).message);
+    }
+  };
+
   const primaryActionLabel = activeTab === 'automation'
     ? '新建自动化'
     : activeTab === 'reply'
       ? '新增关键词'
-      : '编辑默认回复';
+      : activeTab === 'greetings'
+        ? '新增首次回复'
+        : '编辑默认回复';
 
   return (
     <div className="min-w-0 space-y-8 animate-fade-in">
@@ -919,7 +1045,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
             刷新
           </button>
           <button
-            onClick={activeTab === 'automation' ? () => openNewAutomationRule('order_paid') : activeTab === 'reply' ? handleAddReplyRule : () => void openDefaultReplyModal()}
+            onClick={activeTab === 'automation' ? () => openNewAutomationRule('order_paid') : activeTab === 'reply' ? handleAddReplyRule : activeTab === 'greetings' ? () => openGreetingModal() : () => void openDefaultReplyModal()}
             disabled={!selectedAccountId}
             className="ios-btn-primary px-5 py-3 rounded-2xl text-sm font-extrabold flex items-center justify-center gap-2 whitespace-nowrap disabled:opacity-50"
           >
@@ -934,6 +1060,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
           { id: 'automation' as const, label: '交易自动化', icon: Zap },
           { id: 'reply' as const, label: '关键词回复', icon: MessageCircle },
           { id: 'default' as const, label: '账号默认回复', icon: Bot },
+          { id: 'greetings' as const, label: '商品首次回复', icon: Gift },
         ].map(tab => {
           const Icon = tab.icon;
           return (
@@ -1334,6 +1461,63 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
               );
             })}
             {visibleDefaultAccounts.length === 0 && <div className="text-center py-20 text-gray-400">暂无账号</div>}
+          </div>
+        </section>
+      )}
+
+      {activeTab === 'greetings' && (
+        <section className="bg-white rounded-xl border border-gray-100 p-6 shadow-sm">
+          <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 px-4 py-2 rounded-xl mb-5 w-fit">
+            <Gift className="w-4 h-4" />
+            买家首次咨询指定商品时发送一次；同一会话只触发一次，之后仍会进入关键词、默认或 AI 回复。
+          </div>
+          <div className="space-y-3">
+            {visibleGreetingRules.map(rule => {
+              const account = accounts.find(item => item.id === rule.cookie_id);
+              return (
+                <div key={rule.id} className={`flex flex-col md:flex-row md:items-center justify-between p-5 rounded-2xl border transition-all gap-4 ${rule.enabled ? 'border-amber-100 bg-amber-50/50 hover:bg-white hover:shadow-lg' : 'border-gray-100 bg-surface-subtle hover:bg-white hover:shadow-lg'}`}>
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${rule.enabled ? 'bg-amber-600 text-white' : 'bg-gray-200 text-gray-400'}`}>
+                      <Gift className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
+                        <h3 className="font-bold text-gray-900 text-lg truncate">{rule.name || '未命名首次回复'}</h3>
+                        <span className={`px-2 py-0.5 rounded-lg text-xs font-bold ${rule.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500'}`}>
+                          {rule.enabled ? '已启用' : '未启用'}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-lg text-xs font-bold bg-amber-100 text-amber-700">
+                          {rule.item_ids.length} 个商品
+                        </span>
+                        <span className="text-xs text-gray-500">{accountLabel(account)}</span>
+                      </div>
+                      <div className="text-sm text-gray-600 line-clamp-2">
+                        {rule.reply_content || rule.reply_image_url || '已配置首次回复'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 border-t md:border-t-0 md:border-l border-gray-200 pt-4 md:pt-0 md:pl-6">
+                    <button
+                      onClick={() => openGreetingModal(rule)}
+                      className="p-2 text-gray-400 hover:text-black hover:bg-gray-100 rounded-xl transition-colors"
+                      title="编辑"
+                    >
+                      <Edit className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => void handleClearGreetingRecords(rule.cookie_id)}
+                      className="px-3 py-2 text-xs font-bold text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+                    >
+                      清空记录
+                    </button>
+                    <button onClick={() => void handleDeleteGreetingRule(rule)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors" title="删除">
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {visibleGreetingRules.length === 0 && <div className="text-center py-20 text-gray-400">暂无商品首次回复规则</div>}
           </div>
         </section>
       )}
@@ -1882,6 +2066,140 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                 >
                   <Send className="w-4 h-4" />
                   保存规则
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showGreetingModal && createPortal(
+        <div className="modal-overlay">
+          <div className="modal-container">
+            <div className="modal-header">
+              <div className="flex items-center justify-between w-full">
+                <div>
+                  <h3 className="text-2xl font-extrabold text-gray-900">{greetingForm.id ? '编辑商品首次回复' : '新建商品首次回复'}</h3>
+                  <p className="text-sm text-gray-500 mt-1">买家首次咨询所选商品时发送一次，同一会话不会重复触发。</p>
+                </div>
+                <button
+                  onClick={() => setShowGreetingModal(false)}
+                  className="p-2 bg-gray-100 rounded-full hover:bg-gray-200 transition-colors"
+                  title="关闭"
+                >
+                  <X className="w-5 h-5 text-gray-600" />
+                </button>
+              </div>
+            </div>
+
+            <div className="modal-body space-y-5">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">闲鱼账号</label>
+                <select
+                  value={greetingForm.cookie_id}
+                  onChange={event => setGreetingForm({ ...greetingForm, cookie_id: event.target.value, item_ids: [] })}
+                  className="w-full ios-input px-4 py-3 rounded-xl"
+                >
+                  <option value="">选择账号</option>
+                  {accounts.map(account => (
+                    <option key={account.id} value={account.id}>{accountLabel(account)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">规则名称（可选）</label>
+                <input
+                  type="text"
+                  value={greetingForm.name}
+                  onChange={event => setGreetingForm({ ...greetingForm, name: event.target.value })}
+                  placeholder="例如：新品首句问候"
+                  className="w-full ios-input px-4 py-3 rounded-xl"
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+                <div>
+                  <div className="font-bold text-gray-900">启用规则</div>
+                  <div className="text-xs text-gray-500 mt-1">停用后不会触发商品首次回复</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGreetingForm({ ...greetingForm, enabled: !greetingForm.enabled })}
+                  className={`w-14 h-8 rounded-full transition-colors duration-300 relative ${greetingForm.enabled ? 'bg-brand' : 'bg-gray-300'}`}
+                >
+                  <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 block ${greetingForm.enabled ? 'translate-x-7' : 'translate-x-1'}`} />
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">回复内容</label>
+                <textarea
+                  value={greetingForm.reply_content}
+                  onChange={event => setGreetingForm({ ...greetingForm, reply_content: event.target.value })}
+                  placeholder="支持 {send_user_name}、{send_user_id}、{send_message}、{item_id} 变量"
+                  className="w-full ios-input px-4 py-3 rounded-xl h-32 resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">回复图片 URL（可选）</label>
+                <input
+                  type="text"
+                  value={greetingForm.reply_image_url}
+                  onChange={event => setGreetingForm({ ...greetingForm, reply_image_url: event.target.value })}
+                  placeholder="https://example.com/image.jpg"
+                  className="w-full ios-input px-4 py-3 rounded-xl"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">覆盖商品（已选 {greetingForm.item_ids.length} 个）</label>
+                <div className="max-h-64 overflow-y-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
+                  {greetingForm.item_ids
+                    .filter(itemID => !greetingItems.some(item => item.item_id === itemID))
+                    .map(itemID => (
+                      <label key={itemID} className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-gray-50">
+                        <input type="checkbox" checked onChange={() => toggleGreetingItem(itemID)} className="w-4 h-4 rounded" />
+                        <span className="truncate text-gray-700">{itemID}</span>
+                        <span className="ml-auto text-xs text-amber-600 font-bold">未同步</span>
+                      </label>
+                    ))}
+                  {greetingItems.map(item => {
+                    const itemID = item.item_id;
+                    return (
+                      <label key={itemID} className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-gray-50">
+                        <input
+                          type="checkbox"
+                          checked={greetingForm.item_ids.includes(itemID)}
+                          onChange={() => toggleGreetingItem(itemID)}
+                          className="w-4 h-4 rounded"
+                        />
+                        <span className="truncate text-gray-700">{item.item_title || itemID}</span>
+                      </label>
+                    );
+                  })}
+                  {!greetingForm.cookie_id && <div className="px-4 py-6 text-sm text-gray-400 text-center">请先选择账号</div>}
+                  {greetingForm.cookie_id && greetingItems.length === 0 && greetingForm.item_ids.length === 0 && (
+                    <div className="px-4 py-6 text-sm text-gray-400 text-center">该账号暂无已同步商品，请先在商品页同步</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  onClick={() => setShowGreetingModal(false)}
+                  className="flex-1 px-6 py-3 rounded-xl font-bold bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSaveGreetingRule}
+                  className="flex-1 ios-btn-primary px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  保存首次回复
                 </button>
               </div>
             </div>

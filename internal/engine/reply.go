@@ -8,6 +8,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -20,9 +21,20 @@ import (
 type ReplyResult struct {
 	Text      string // 文本回复（可空）
 	ImageURL  string // 图片回复（可空）
-	Source    string // 回复来源：API/关键词/AI/默认
+	Source    string // 回复来源：API/关键词/AI/默认/商品首次回复
 	Skip      bool   // true 表示匹配到空回复，不发送任何内容
-	ReplyOnce bool   // 仅默认回复使用，发送状态由 Handle 持久化
+	ReplyOnce bool   // 仅一次性回复使用，发送状态由 Handle 持久化
+	// records 是一次性回复使用的投递记录表；为空时使用账号默认回复记录。
+	records replyRecordStore
+}
+
+// replyRecordStore 是一条回复按会话去重所需的持久化投递状态。
+// 默认回复和商品首次回复各使用一张记录表，但状态机语义相同。
+type replyRecordStore interface {
+	ClaimRecord(ctx context.Context, cookieID, chatID string, needsText, needsImage bool) (db.DefaultReplyRecord, bool, error)
+	MarkPartSent(ctx context.Context, cookieID, chatID, part string) error
+	MarkRecordFailed(ctx context.Context, cookieID, chatID, message string) error
+	MarkRecordSent(ctx context.Context, cookieID, chatID string) error
 }
 
 // APIReplier 外部 API 回复（优先级1）。返回 nil 表示无回复。
@@ -91,10 +103,12 @@ func (r *ReplyService) humanTakeoverActive(ctx context.Context, m ChatMessage) b
 	return time.Since(last) < humanTakeoverWindow
 }
 
-// Handle 收到一条聊天消息，按四级优先级回复。
+// Handle 收到一条聊天消息，先尝试商品首次回复，再按四级优先级回复。
 // 由 Account 在防抖后调用。返回是否产生了回复。
 func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	started := time.Now()
+	// 商品首次回复失败只记录日志，不得阻断买家本条消息的正常回复链路。
+	r.handleItemGreeting(ctx, m)
 	r.logger.Info("AI诊断：消息进入回复链", "chat_id", m.ChatID, "item_id", m.ItemID, "message_kind", classifyAIMessage(m), "text_len", len([]rune(m.Text)))
 	// 真人卖家刚回复过 → AI 让位，跳过本次回复（含关键词/默认回复）。
 	if r.humanTakeoverActive(ctx, m) {
@@ -112,13 +126,26 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 		r.logger.Warn("AI诊断：回复链得到内容但发送器未注入", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source)
 		return nil
 	}
+	if err := r.deliver(ctx, m, res); err != nil {
+		return err
+	}
+	r.logger.Info("AI诊断：回复链发送完成", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source, "text_len", len([]rune(res.Text)), "duration", time.Since(started).Round(time.Millisecond))
+	return nil
+}
+
+// deliver 发送一条已解析的回复；一次性回复先原子领取会话记录，再按分段状态投递。
+func (r *ReplyService) deliver(ctx context.Context, m ChatMessage, res *ReplyResult) error {
+	records := res.records
+	if records == nil {
+		records = r.store.DefaultReps
+	}
 	record := db.DefaultReplyRecord{}
 	if res.ReplyOnce && m.ChatID != "" {
 		var claimed bool
 		var err error
-		record, claimed, err = r.store.DefaultReps.ClaimRecord(ctx, r.cookieID, m.ChatID, res.Text != "", res.ImageURL != "")
+		record, claimed, err = records.ClaimRecord(ctx, r.cookieID, m.ChatID, res.Text != "", res.ImageURL != "")
 		if err != nil {
-			return fmt.Errorf("领取默认回复发送任务: %w", err)
+			return fmt.Errorf("领取%s回复发送任务: %w", res.Source, err)
 		}
 		if !claimed {
 			return nil
@@ -133,7 +160,7 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 			return err
 		}
 		if res.ReplyOnce && m.ChatID != "" {
-			if err := r.store.DefaultReps.MarkPartSent(ctx, r.cookieID, m.ChatID, "image"); err != nil {
+			if err := records.MarkPartSent(ctx, r.cookieID, m.ChatID, "image"); err != nil {
 				r.markReplyFailure(ctx, res, m, err)
 				return err
 			}
@@ -146,25 +173,57 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 			return err
 		}
 		if res.ReplyOnce && m.ChatID != "" {
-			if err := r.store.DefaultReps.MarkPartSent(ctx, r.cookieID, m.ChatID, "text"); err != nil {
+			if err := records.MarkPartSent(ctx, r.cookieID, m.ChatID, "text"); err != nil {
 				r.markReplyFailure(ctx, res, m, err)
 				return err
 			}
 		}
 	}
 	if res.ReplyOnce && m.ChatID != "" {
-		if err := r.store.DefaultReps.MarkRecordSent(ctx, r.cookieID, m.ChatID); err != nil {
+		if err := records.MarkRecordSent(ctx, r.cookieID, m.ChatID); err != nil {
 			r.markReplyFailure(ctx, res, m, err)
 			return err
 		}
 	}
-	r.logger.Info("AI诊断：回复链发送完成", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source, "text_len", len([]rune(res.Text)), "duration", time.Since(started).Round(time.Millisecond))
 	return nil
+}
+
+// handleItemGreeting 在会话首条命中商品规则的消息上发送一次商品首次回复。
+// 规则、记录读取或发送失败都只记录日志；一次性记录保证每个会话最多触发一次。
+func (r *ReplyService) handleItemGreeting(ctx context.Context, m ChatMessage) {
+	if m.ItemID == "" || m.ChatID == "" || r.sender == nil || r.store == nil || r.store.ItemGreetings == nil {
+		return
+	}
+	rule, err := r.store.ItemGreetings.FindEnabledForItem(ctx, r.cookieID, m.ItemID)
+	if errors.Is(err, db.ErrNotFound) {
+		return
+	}
+	if err != nil {
+		r.logger.Error("读取商品首次回复规则失败", "err", err)
+		return
+	}
+	res := &ReplyResult{Source: "商品首次回复", ReplyOnce: true, records: r.store.ItemGreetings}
+	if strings.TrimSpace(rule.ReplyContent) != "" {
+		res.Text = formatReplyWithItem(rule.ReplyContent, m)
+	}
+	if strings.TrimSpace(rule.ReplyImageURL) != "" {
+		res.ImageURL = rule.ReplyImageURL
+	}
+	if res.Text == "" && res.ImageURL == "" {
+		return
+	}
+	if deliverErr := r.deliver(ctx, m, res); deliverErr != nil {
+		r.logger.Error("商品首次回复发送失败", "err", deliverErr)
+	}
 }
 
 func (r *ReplyService) markReplyFailure(ctx context.Context, res *ReplyResult, m ChatMessage, sendErr error) {
 	if res.ReplyOnce && m.ChatID != "" {
-		_ = r.store.DefaultReps.MarkRecordFailed(ctx, r.cookieID, m.ChatID, sendErr.Error())
+		records := res.records
+		if records == nil {
+			records = r.store.DefaultReps
+		}
+		_ = records.MarkRecordFailed(ctx, r.cookieID, m.ChatID, sendErr.Error())
 	}
 }
 
@@ -254,6 +313,10 @@ func (r *ReplyService) defaultReply(ctx context.Context, m ChatMessage) *ReplyRe
 	if strings.TrimSpace(dr.ReplyContent) == "" && strings.TrimSpace(dr.ReplyImageURL) == "" {
 		return &ReplyResult{Skip: true, Source: "默认"}
 	}
+	// 商品首次回复已触发的会话不再发送账号级“仅回复一次”的默认回复，商品级覆盖账号级。
+	if dr.ReplyOnce && r.itemGreetingTriggered(ctx, m) {
+		return nil
+	}
 	res := &ReplyResult{Source: "默认", ReplyOnce: dr.ReplyOnce}
 	if strings.TrimSpace(dr.ReplyContent) != "" {
 		res.Text = formatReply(dr.ReplyContent, m)
@@ -262,6 +325,19 @@ func (r *ReplyService) defaultReply(ctx context.Context, m ChatMessage) *ReplyRe
 		res.ImageURL = dr.ReplyImageURL
 	}
 	return res
+}
+
+// itemGreetingTriggered 判断当前会话是否已有商品首次回复记录；读取失败时按未触发处理，保持默认回复可用。
+func (r *ReplyService) itemGreetingTriggered(ctx context.Context, m ChatMessage) bool {
+	if m.ChatID == "" || r.store == nil || r.store.ItemGreetings == nil {
+		return false
+	}
+	triggered, err := r.store.ItemGreetings.HasRecord(ctx, r.cookieID, m.ChatID)
+	if err != nil {
+		r.logger.Error("读取商品首次回复记录失败", "err", err)
+		return false
+	}
+	return triggered
 }
 
 // formatReply 变量替换：{send_user_name} {send_user_id} {send_message}。

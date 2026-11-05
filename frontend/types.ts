@@ -433,6 +433,26 @@ export interface DefaultReply {
   reply_image_url?: string;
 }
 
+// 商品首次回复规则：买家首次咨询指定商品时发送一次。
+export interface ItemGreetingRule {
+  id: number;
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  reply_content: string;
+  reply_image_url: string;
+  item_ids: string[];
+}
+
+export interface ItemGreetingRuleInput {
+  cookie_id: string;
+  name: string;
+  enabled: boolean;
+  reply_content: string;
+  reply_image_url: string;
+  item_ids: string[];
+}
+
 // 通知渠道
 export type NotificationChannelType = 'dingtalk' | 'feishu' | 'bark' | 'webhook' | 'wechat' | 'telegram' | 'email';
 export type NotificationEventType =

@@ -196,6 +196,8 @@ func (s *Server) Router() http.Handler {
 		s.mountItemRepliesReal(r)
 		// 默认回复
 		s.mountDefaultRepliesReal(r)
+		// 商品首次回复
+		s.mountItemGreetingsReal(r)
 		// 通知
 		s.mountNotificationsReal(r)
 		// 系统设置（已认证）

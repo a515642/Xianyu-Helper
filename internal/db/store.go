@@ -20,6 +20,7 @@ type Store struct {
 	Keywords          *Keywords
 	DefaultReps       *DefaultReplies
 	ItemReps          *ItemReplies
+	ItemGreetings     *ItemGreetings
 	AIReply           *AIReply
 	AIProfiles        *AIProfiles
 	Notifications     *Notifications
@@ -54,6 +55,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		Keywords:          &Keywords{DB: db, Dialect: dialect},
 		DefaultReps:       &DefaultReplies{DB: db, Dialect: dialect},
 		ItemReps:          &ItemReplies{DB: db, Dialect: dialect},
+		ItemGreetings:     &ItemGreetings{DB: db, Dialect: dialect},
 		AIReply:           &AIReply{DB: db, codec: codec},
 		AIProfiles:        &AIProfiles{DB: db, Dialect: dialect, codec: codec},
 		Notifications:     &Notifications{DB: db, Dialect: dialect, codec: codec},
