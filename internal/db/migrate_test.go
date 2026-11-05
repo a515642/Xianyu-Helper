@@ -58,6 +58,10 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"risk_control_logs", "duration_ms"},
 		{"notification_outbox", "worker_token"},
 		{"cards", "kind"},
+		{"orders", "is_red_flower"},
+		{"account_task_settings", "auto_freeshipping_enabled"},
+		{"account_task_settings", "auto_red_flower_enabled"},
+		{"account_task_settings", "last_red_flower_scan_at"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {
@@ -130,7 +134,7 @@ func TestLatestMigrationsDownUpSQLite(t *testing.T) {
 	goose.SetBaseFS(migrationsFS)
 	// 依次回滚最新版本到 13，再整体升级。00029/00030 是聊天已读，
 	// 00034 是发货模板迁移，00036 是卡密条目迁移，因此需要额外回滚四次才能到达原有的 migration 14 检查点。
-	for i := 0; i < 25; i++ {
+	for i := 0; i < 28; i++ {
 		if err := goose.Down(d, "migrations/sqlite"); err != nil {
 			t.Fatalf("down migration #%d: %v", i+1, err)
 		}

@@ -112,6 +112,8 @@ export const getAccountDetails = async (options?: RequestControlOptions): Promis
 		rate_content: item.rate_content || '不错的买家，交易愉快',
 		auto_polish_enabled: item.auto_polish_enabled === true || item.auto_polish_enabled === 1,
 		polish_time: item.polish_time || '03:00',
+		auto_freeshipping_enabled: item.auto_freeshipping_enabled === true || item.auto_freeshipping_enabled === 1,
+		auto_red_flower_enabled: item.auto_red_flower_enabled === true || item.auto_red_flower_enabled === 1,
 		last_rate_scan_at: Number(item.last_rate_scan_at || 0),
 		last_polish_date: item.last_polish_date || '',
 		last_polish_at: Number(item.last_polish_at || 0),
@@ -124,8 +126,14 @@ export const getAccountTaskSettings = async (id: string): Promise<AccountTaskSet
 export const updateAccountTaskSettings = async (id: string, settings: AccountTaskSettings): Promise<AccountTaskSettings> =>
 	put(`/api/account-tasks/${id}`, settings);
 
-export const runAccountTask = async (id: string, taskType: 'auto_rate' | 'auto_polish'): Promise<{success: boolean; summary: AccountTaskSummary}> =>
+export type AccountTaskType = 'auto_rate' | 'auto_polish' | 'auto_red_flower';
+
+export const runAccountTask = async (id: string, taskType: AccountTaskType): Promise<{success: boolean; summary: AccountTaskSummary}> =>
 	post(`/api/account-tasks/${id}/run`, { task_type: taskType }, { timeoutMs: 120_000 });
+
+// 对小刀订单手动执行一次免拼发货（人工补发/诊断）。
+export const freeshippingOrder = async (orderId: string): Promise<ApiResponse> =>
+	post(`/orders/${orderId}/freeshipping`, {}, { timeoutMs: 120_000 });
 
 export interface ChatSessionPage { sessions: ChatSession[]; has_more: boolean; next_cursor?: number }
 

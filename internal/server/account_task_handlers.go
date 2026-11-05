@@ -67,6 +67,15 @@ func (s *Server) updateAccountTaskSettings(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, stored)
 }
 
+func supportedAccountTaskType(taskType string) bool {
+	switch taskType {
+	case automation.TaskAutoRate, automation.TaskAutoPolish, automation.TaskRedFlower:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) listAccountTaskRuns(w http.ResponseWriter, r *http.Request) {
 	cid := chi.URLParam(r, "cid")
 	if !s.ownsAccount(r, cid) {
@@ -94,7 +103,7 @@ func (s *Server) runAccountTask(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		TaskType string `json:"task_type"`
 	}
-	if decodeJSON(r, &input) != nil || (input.TaskType != automation.TaskAutoRate && input.TaskType != automation.TaskAutoPolish) {
+	if decodeJSON(r, &input) != nil || !supportedAccountTaskType(input.TaskType) {
 		writeErr(w, http.StatusBadRequest, "不支持的任务类型")
 		return
 	}

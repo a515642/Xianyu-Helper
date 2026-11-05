@@ -171,11 +171,10 @@ func (c *ClientImpl) accountTaskRequestOnce(ctx context.Context, cookiesStr, end
 	if token == "" {
 		return nil, cookiesStr, fmt.Errorf("cookie 缺少 _m_h5_tk，无法调用 %s", api)
 	}
-	rawData, err := json.Marshal(data)
+	dataVal, err := marshalAccountTaskData(data)
 	if err != nil {
 		return nil, cookiesStr, err
 	}
-	dataVal := string(rawData)
 	t := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	sign := protocol.GenerateSign(t, token, dataVal)
 	query := url.Values{}
@@ -225,6 +224,26 @@ func (c *ClientImpl) accountTaskRequestOnce(ctx context.Context, cookiesStr, end
 		return nil, updated, fmt.Errorf("解析 %s 响应: %w", api, err)
 	}
 	return &decoded, updated, nil
+}
+
+// freeshippingTerminalRet 判断免拼失败是否不可恢复（无需重试）。
+func FreeshippingTerminalFailure(ret []string) bool {
+	joined := strings.Join(ret, "; ")
+	for _, marker := range []string{
+		"GROUPON_ACTIVITY_ITEM_CHECK_ERROR", "ITEM_NOT_FOUND", "ITEM_DELETED",
+		"ORDER_NOT_EXIST", "BUYER_NOT_EXIST", "ORDER_STATUS_ERROR",
+	} {
+		if strings.Contains(joined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// freeshippingAlreadyDone 判断免拼是否已经完成过（幂等成功）。
+func FreeshippingAlreadyDone(ret []string) bool {
+	joined := strings.Join(ret, "; ")
+	return strings.Contains(joined, "ORDER_ALREADY_DELIVERY") || strings.Contains(joined, "已发货成功")
 }
 
 func firstRet(ret []string) string {

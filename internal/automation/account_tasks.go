@@ -65,6 +65,8 @@ func (c *Center) runConfiguredAccountTask(ctx context.Context, settings db.Accou
 		summary, err = c.runAutoRate(ctx, settings)
 	case TaskAutoPolish:
 		summary, err = c.runAutoPolish(ctx, settings, beijingNow(), true)
+	case TaskRedFlower:
+		summary, err = c.runRedFlower(ctx, settings)
 	default:
 		return AccountTaskSummary{TaskType: taskType}, fmt.Errorf("不支持的账号任务: %s", taskType)
 	}
@@ -95,6 +97,11 @@ func (c *Center) scanAccountTasks(ctx context.Context) {
 		if setting.AutoRateEnabled {
 			if _, err := c.runConfiguredAccountTask(ctx, setting, TaskAutoRate); err != nil {
 				c.logger.Warn("自动评价扫描失败", "account", setting.CookieID, "err", err)
+			}
+		}
+		if setting.AutoRedFlowerEnabled {
+			if _, err := c.runRedFlower(ctx, setting); err != nil {
+				c.logger.Warn("求小红花扫描失败", "account", setting.CookieID, "err", err)
 			}
 		}
 		if setting.AutoPolishEnabled && polishDue(setting, now) {

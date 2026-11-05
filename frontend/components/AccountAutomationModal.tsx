@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CalendarClock, Loader2, MessageSquareQuote, Play, Save, Sparkles, X } from 'lucide-react';
+import { CalendarClock, Loader2, MessageSquareQuote, PackageCheck, Play, Save, Sparkles, Sparkle, X } from 'lucide-react';
 import { AccountDetail, AccountTaskSettings, AccountTaskSummary } from '../types';
 import { getAccountTaskSettings, runAccountTask, updateAccountTaskSettings } from '../services/api';
 
@@ -23,12 +23,15 @@ const AccountAutomationModal: React.FC<Props> = ({ account, onClose, onSaved }) 
     rate_content: account.rate_content || '不错的买家，交易愉快',
     auto_polish_enabled: account.auto_polish_enabled === true,
     polish_time: account.polish_time || '03:00',
+    auto_freeshipping_enabled: account.auto_freeshipping_enabled === true,
+    auto_red_flower_enabled: account.auto_red_flower_enabled === true,
     last_rate_scan_at: account.last_rate_scan_at,
     last_polish_date: account.last_polish_date,
     last_polish_at: account.last_polish_at,
+    last_red_flower_scan_at: account.last_red_flower_scan_at,
   });
   const [saving, setSaving] = useState(false);
-  const [running, setRunning] = useState<'' | 'auto_rate' | 'auto_polish'>('');
+  const [running, setRunning] = useState<'' | 'auto_rate' | 'auto_polish' | 'auto_red_flower'>('');
   const [error, setError] = useState('');
   const [summary, setSummary] = useState<AccountTaskSummary | null>(null);
 
@@ -46,7 +49,7 @@ const AccountAutomationModal: React.FC<Props> = ({ account, onClose, onSaved }) 
     }
   };
 
-  const run = async (taskType: 'auto_rate' | 'auto_polish') => {
+  const run = async (taskType: 'auto_rate' | 'auto_polish' | 'auto_red_flower') => {
     setRunning(taskType);
     setError('');
     setSummary(null);
@@ -126,6 +129,43 @@ const AccountAutomationModal: React.FC<Props> = ({ account, onClose, onSaved }) 
                   </button>
                 </div>
                 <div className="mt-3 text-xs text-slate-400">上次完成：{form.last_polish_at ? new Date(form.last_polish_at * 1000).toLocaleString('zh-CN') : '尚未执行'}</div>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5">
+            <div className="flex items-start gap-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600"><PackageCheck className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h4 className="font-black text-slate-900">小刀自动免拼</h4>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">买家发起「我已小刀，待刀成」时，自动调用免拼发货接口；每个订单只执行一次。</p>
+                  </div>
+                  <Toggle checked={form.auto_freeshipping_enabled === true} onChange={() => setForm(current => ({ ...current, auto_freeshipping_enabled: !current.auto_freeshipping_enabled }))} label="小刀自动免拼" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5">
+            <div className="flex items-start gap-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-500"><Sparkle className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h4 className="font-black text-slate-900">自动求小红花</h4>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">持续扫描近 10 天内的订单，向买家求小红花；已求过的订单不会重复。</p>
+                  </div>
+                  <Toggle checked={form.auto_red_flower_enabled === true} onChange={() => setForm(current => ({ ...current, auto_red_flower_enabled: !current.auto_red_flower_enabled }))} label="自动求小红花" />
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-400">最近扫描：{form.last_red_flower_scan_at ? new Date(form.last_red_flower_scan_at * 1000).toLocaleString('zh-CN') : '尚未执行'}</span>
+                  <button type="button" disabled={running !== '' || !account.enabled} onClick={() => void run('auto_red_flower')}
+                    className="flex items-center gap-2 rounded-xl bg-rose-50 px-3 py-2 text-xs font-extrabold text-rose-600 hover:bg-rose-100 disabled:opacity-50">
+                    {running === 'auto_red_flower' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}立即求花
+                  </button>
+                </div>
               </div>
             </div>
           </section>

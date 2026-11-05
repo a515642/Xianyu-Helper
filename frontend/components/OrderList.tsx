@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AccountDetail, Order, OrderStatus, Item } from '../types';
-import { getOrders, syncOrders, syncSingleOrder, manualShipOrder, updateOrder, deleteOrder, importOrders, getItems, getAccountDetails } from '../services/api';
+import { getOrders, syncOrders, syncSingleOrder, manualShipOrder, updateOrder, deleteOrder, importOrders, getItems, getAccountDetails, freeshippingOrder } from '../services/api';
 import { Search, MoreHorizontal, Truck, RefreshCw, Copy, ChevronLeft, ChevronRight, PackageCheck, Edit, Eye, Plus, Save, X, User as UserIcon, Phone, MapPin, Upload, ExternalLink, Trash2 } from 'lucide-react';
 import { failedOrderImportRows, normalizeOrderImportResult, OrderImportResult } from './orderImportState';
 import { formatLocalDateTime } from '../dateTime';
@@ -205,6 +205,21 @@ const OrderList: React.FC = () => {
           }
       } catch (e: any) {
           setShipResult({ success: false, message: e?.message || '请求失败' });
+      } finally {
+          setShipLoading(false);
+      }
+  };
+
+  // 小刀订单的人工免拼补发：绕过账号自动开关，但仍保留幂等。
+  const executeFreeshipping = async () => {
+      setShipLoading(true);
+      setShipResult(null);
+      try {
+          await freeshippingOrder(shipOrderId);
+          setShipResult({ success: true, message: '免拼发货成功' });
+          loadOrders();
+      } catch (e: any) {
+          setShipResult({ success: false, message: e?.message || '免拼发货失败' });
       } finally {
           setShipLoading(false);
       }
@@ -811,6 +826,25 @@ const OrderList: React.FC = () => {
                     <div className="text-xs text-gray-500 mt-1 leading-relaxed">
                       自动匹配发货规则、获取卡券、发送卡券信息给买家，并修改发货状态。
                       适用于订单既没有发送卡券给买家、也没有修改发货状态的情况。
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              {/* 选项C: 小刀订单免拼发货 */}
+              <button
+                onClick={() => void executeFreeshipping()}
+                disabled={shipLoading}
+                className="w-full text-left p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <PackageCheck className="w-5 h-5 text-indigo-600" />
+                  </div>
+                  <div>
+                    <div className="font-bold text-gray-900 text-sm">小刀订单免拼发货</div>
+                    <div className="text-xs text-gray-500 mt-1 leading-relaxed">
+                      仅对买家"小刀"（砍价成团）订单调用免拼发货接口。用于自动免拼失败后的人工补发。
                     </div>
                   </div>
                 </div>

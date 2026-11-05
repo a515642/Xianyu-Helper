@@ -22,6 +22,8 @@ const (
 	TriggerOrderPaid            = "order_paid"
 	TriggerBuyerReviewed        = "buyer_reviewed"
 	TriggerReviewMissingTimeout = "review_missing_timeout"
+	// TriggerBargain 是买家"小刀"（砍价成团）卡片，用于触发自动免拼发货。
+	TriggerBargain = "bargain"
 
 	ActionConfirmShipment = "confirm_shipment"
 	ActionSendCard        = "send_card"
@@ -88,6 +90,8 @@ func ExtractTaskFromWS(accountID, cookieStr string, raw map[string]any) *Task {
 		Raw:       raw,
 	}
 	switch {
+	case isBargainEvent(raw, f):
+		task.TriggerType = TriggerBargain
 	case isOrderCreatedEvent(f):
 		task.TriggerType = TriggerOrderCreated
 	case isOrderPaidEvent(f):
@@ -189,6 +193,52 @@ func fieldsFromRaw(raw map[string]any) rawFields {
 		}
 	}
 	return f
+}
+
+// bargainCardTitle 是买家"小刀"（砍价成团）卡片的标题文案。
+const bargainCardTitle = "我已小刀，待刀成"
+
+// isBargainEvent 判断是否为买家小刀卡片。小刀卡片不在 10.reminderContent 里
+// 携带订单号，需要从 dxCard 的 targetUrl 解析。
+func isBargainEvent(raw map[string]any, f rawFields) bool {
+	if strings.TrimSpace(f.orderID) == "" || f.orderRole == "buyer" {
+		return false
+	}
+	for _, contentJSON := range cardJSONCandidates(raw) {
+		if extractCardTitleFromContent(contentJSON) == bargainCardTitle {
+			return true
+		}
+	}
+	return false
+}
+
+// extractCardTitleFromContent 从卡片 JSON 中取 dxCard...exContent.title。
+func extractCardTitleFromContent(contentJSON string) string {
+	var c any
+	if json.Unmarshal([]byte(contentJSON), &c) != nil {
+		return ""
+	}
+	var title string
+	walkDecoded(c, func(value any) bool {
+		if m, ok := value.(map[string]any); ok {
+			if isDxCardMain(m) {
+				if ex, ok := m["exContent"].(map[string]any); ok {
+					if t := strings.TrimSpace(strAny(ex["title"])); t != "" {
+						title = t
+						return true
+					}
+				}
+			}
+		}
+		return false
+	})
+	return title
+}
+
+// isDxCardMain 判断该 map 是否为 dxCard.item.main 节点（含 exContent）。
+func isDxCardMain(m map[string]any) bool {
+	_, hasEx := m["exContent"]
+	return hasEx
 }
 
 func isOrderCreatedEvent(f rawFields) bool {

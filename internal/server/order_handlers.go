@@ -31,6 +31,8 @@ type orderDetailMTop interface {
 
 // mountOrders 订单端点（真实实现）。
 func (s *Server) mountOrdersReal(r chi.Router) {
+	// 小刀订单手动免拼发货。
+	r.Post("/orders/{order_id}/freeshipping", s.freeshippingOrder)
 	r.Get("/api/orders", s.listOrders)
 	r.Get("/api/orders/{order_id}", s.getOrder)
 	r.Post("/api/orders/refresh", s.refreshOrders)

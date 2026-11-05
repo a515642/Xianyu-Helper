@@ -61,6 +61,11 @@ export interface AccountDetail {
 	rate_content?: string;
 	auto_polish_enabled?: boolean;
 	polish_time?: string;
+	// 小刀（砍价成团）自动免拼
+	auto_freeshipping_enabled?: boolean;
+	// 自动求小红花
+	auto_red_flower_enabled?: boolean;
+	last_red_flower_scan_at?: number;
 	last_rate_scan_at?: number;
 	last_polish_date?: string;
 	last_polish_at?: number;
@@ -111,6 +116,9 @@ export interface AIProfileInput {
 }
 
 export interface AccountTaskSettings {
+	auto_freeshipping_enabled?: boolean;
+	auto_red_flower_enabled?: boolean;
+	last_red_flower_scan_at?: number;
 	account_id: string;
 	auto_rate_enabled: boolean;
 	rate_content: string;

@@ -9,14 +9,17 @@ import (
 )
 
 type AccountTaskSettings struct {
-	CookieID          string `json:"account_id"`
-	AutoRateEnabled   bool   `json:"auto_rate_enabled"`
-	RateContent       string `json:"rate_content"`
-	AutoPolishEnabled bool   `json:"auto_polish_enabled"`
-	PolishTime        string `json:"polish_time"`
-	LastRateScanAt    int64  `json:"last_rate_scan_at"`
-	LastPolishDate    string `json:"last_polish_date"`
-	LastPolishAt      int64  `json:"last_polish_at"`
+	CookieID                string `json:"account_id"`
+	AutoRateEnabled         bool   `json:"auto_rate_enabled"`
+	RateContent             string `json:"rate_content"`
+	AutoPolishEnabled       bool   `json:"auto_polish_enabled"`
+	PolishTime              string `json:"polish_time"`
+	AutoFreeshippingEnabled bool   `json:"auto_freeshipping_enabled"`
+	AutoRedFlowerEnabled    bool   `json:"auto_red_flower_enabled"`
+	LastRateScanAt          int64  `json:"last_rate_scan_at"`
+	LastPolishDate          string `json:"last_polish_date"`
+	LastPolishAt            int64  `json:"last_polish_at"`
+	LastRedFlowerScanAt     int64  `json:"last_red_flower_scan_at"`
 }
 
 type AccountTaskRun struct {
@@ -47,15 +50,21 @@ func defaultAccountTaskSettings(cookieID string) AccountTaskSettings {
 func (s *AccountTaskStore) Get(ctx context.Context, cookieID string) (AccountTaskSettings, error) {
 	result := defaultAccountTaskSettings(cookieID)
 	var rateEnabled, polishEnabled int
+	var freeshippingEnabled, redFlowerEnabled int
 	err := s.DB.QueryRowContext(ctx, `SELECT auto_rate_enabled,rate_content,auto_polish_enabled,polish_time,
-		last_rate_scan_at,last_polish_date,last_polish_at FROM account_task_settings WHERE cookie_id=?`, cookieID).Scan(
-		&rateEnabled, &result.RateContent, &polishEnabled, &result.PolishTime, &result.LastRateScanAt,
-		&result.LastPolishDate, &result.LastPolishAt)
+		auto_freeshipping_enabled,auto_red_flower_enabled,
+		last_rate_scan_at,last_polish_date,last_polish_at,last_red_flower_scan_at
+		FROM account_task_settings WHERE cookie_id=?`, cookieID).Scan(
+		&rateEnabled, &result.RateContent, &polishEnabled, &result.PolishTime,
+		&freeshippingEnabled, &redFlowerEnabled, &result.LastRateScanAt,
+		&result.LastPolishDate, &result.LastPolishAt, &result.LastRedFlowerScanAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, nil
 	}
 	result.AutoRateEnabled = rateEnabled != 0
 	result.AutoPolishEnabled = polishEnabled != 0
+	result.AutoFreeshippingEnabled = freeshippingEnabled != 0
+	result.AutoRedFlowerEnabled = redFlowerEnabled != 0
 	return result, err
 }
 
@@ -69,23 +78,28 @@ func (s *AccountTaskStore) Upsert(ctx context.Context, settings AccountTaskSetti
 	}
 	now := time.Now().UTC().Unix()
 	query := `INSERT INTO account_task_settings
-		(cookie_id,auto_rate_enabled,rate_content,auto_polish_enabled,polish_time,last_rate_scan_at,last_polish_date,last_polish_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)` + dialectUpsert(s.Dialect, []string{"cookie_id"}, map[string]string{
+		(cookie_id,auto_rate_enabled,rate_content,auto_polish_enabled,polish_time,auto_freeshipping_enabled,auto_red_flower_enabled,last_rate_scan_at,last_polish_date,last_polish_at,last_red_flower_scan_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)` + dialectUpsert(s.Dialect, []string{"cookie_id"}, map[string]string{
 		"auto_rate_enabled": "EXCLUDED.auto_rate_enabled", "rate_content": "EXCLUDED.rate_content",
 		"auto_polish_enabled": "EXCLUDED.auto_polish_enabled", "polish_time": "EXCLUDED.polish_time",
-		"updated_at": "EXCLUDED.updated_at",
+		"auto_freeshipping_enabled": "EXCLUDED.auto_freeshipping_enabled",
+		"auto_red_flower_enabled":   "EXCLUDED.auto_red_flower_enabled",
+		"updated_at":                "EXCLUDED.updated_at",
 	})
 	_, err := s.DB.ExecContext(ctx, query, settings.CookieID, boolInt(settings.AutoRateEnabled), settings.RateContent,
-		boolInt(settings.AutoPolishEnabled), settings.PolishTime, settings.LastRateScanAt, settings.LastPolishDate,
-		settings.LastPolishAt, now, now)
+		boolInt(settings.AutoPolishEnabled), settings.PolishTime, boolInt(settings.AutoFreeshippingEnabled),
+		boolInt(settings.AutoRedFlowerEnabled), settings.LastRateScanAt, settings.LastPolishDate,
+		settings.LastPolishAt, settings.LastRedFlowerScanAt, now, now)
 	return err
 }
 
 func (s *AccountTaskStore) Enabled(ctx context.Context) ([]AccountTaskSettings, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT s.cookie_id,s.auto_rate_enabled,s.rate_content,s.auto_polish_enabled,s.polish_time,
-		s.last_rate_scan_at,s.last_polish_date,s.last_polish_at
+		s.auto_freeshipping_enabled,s.auto_red_flower_enabled,
+		s.last_rate_scan_at,s.last_polish_date,s.last_polish_at,s.last_red_flower_scan_at
 		FROM account_task_settings s JOIN cookies c ON c.id=s.cookie_id
-		WHERE s.auto_rate_enabled=1 OR s.auto_polish_enabled=1 ORDER BY s.cookie_id`)
+		WHERE s.auto_rate_enabled=1 OR s.auto_polish_enabled=1
+		   OR s.auto_freeshipping_enabled=1 OR s.auto_red_flower_enabled=1 ORDER BY s.cookie_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -93,12 +107,14 @@ func (s *AccountTaskStore) Enabled(ctx context.Context) ([]AccountTaskSettings, 
 	var result []AccountTaskSettings
 	for rows.Next() {
 		var row AccountTaskSettings
-		var rate, polish int
+		var rate, polish, freeshipping, redFlower int
 		if err := rows.Scan(&row.CookieID, &rate, &row.RateContent, &polish, &row.PolishTime,
-			&row.LastRateScanAt, &row.LastPolishDate, &row.LastPolishAt); err != nil {
+			&freeshipping, &redFlower, &row.LastRateScanAt, &row.LastPolishDate, &row.LastPolishAt,
+			&row.LastRedFlowerScanAt); err != nil {
 			return nil, err
 		}
 		row.AutoRateEnabled, row.AutoPolishEnabled = rate != 0, polish != 0
+		row.AutoFreeshippingEnabled, row.AutoRedFlowerEnabled = freeshipping != 0, redFlower != 0
 		result = append(result, row)
 	}
 	return result, rows.Err()
@@ -156,6 +172,38 @@ func (s *AccountTaskStore) MarkRateScan(ctx context.Context, cookieID string, at
 func (s *AccountTaskStore) MarkPolished(ctx context.Context, cookieID, date string, at int64) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE account_task_settings SET last_polish_date=?,last_polish_at=?,updated_at=? WHERE cookie_id=?`, date, at, at, cookieID)
 	return err
+}
+
+// MarkRedFlowerScan 记录最近一次求小红花扫描时间。
+func (s *AccountTaskStore) MarkRedFlowerScan(ctx context.Context, cookieID string, at int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE account_task_settings SET last_red_flower_scan_at=?,updated_at=? WHERE cookie_id=?`, at, at, cookieID)
+	return err
+}
+
+// RedFlowerCandidates 返回该账号近期需要求小红花的订单号（下单时间在 sinceUnix（秒）之后）。
+func (s *AccountTaskStore) RedFlowerCandidates(ctx context.Context, cookieID string, sinceUnix int64, limit int) ([]string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT order_id FROM orders
+		WHERE cookie_id=? AND is_red_flower=0 AND deleted_at IS NULL
+		  AND order_status NOT IN ('unknown','cancelled','refunding')
+		  AND created_at >= ?
+		ORDER BY created_at ASC LIMIT ?`,
+		cookieID, time.Unix(sinceUnix, 0).UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var orderID string
+		if err := rows.Scan(&orderID); err != nil {
+			return nil, err
+		}
+		out = append(out, orderID)
+	}
+	return out, rows.Err()
 }
 
 func (s *AccountTaskStore) RecentRuns(ctx context.Context, cookieID string, limit int) ([]AccountTaskRun, error) {

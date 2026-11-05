@@ -95,9 +95,11 @@ type Center struct {
 	notifier     Notifier
 	mtop         mtop.Client
 	accountTasks AccountTaskClient
-	logger       *slog.Logger
-	cookieSrc    func(context.Context, string) (string, error)
-	cardLocks    sync.Map
+	// grouponRedFlower 承载小刀免拼与求小红花；可由 SetGrouponRedFlowerClient 注入。
+	grouponRedFlower GrouponRedFlowerClient
+	logger           *slog.Logger
+	cookieSrc        func(context.Context, string) (string, error)
+	cardLocks        sync.Map
 	// sessionExpired 保存检测到 Session 失效时的凭证指纹。在凭证续期或
 	// 重新登录真正改变之前，账号任务不得再次调用任何 MTOP 业务接口。
 	sessionExpired sync.Map
@@ -109,14 +111,26 @@ func New(store *db.Store, senders SenderProvider, logger *slog.Logger) *Center {
 		logger = slog.Default()
 	}
 	client := mtop.NewClient()
-	return &Center{store: store, senders: senders, mtop: client, accountTasks: client, logger: logger.With("subsys", "automation")}
+	return &Center{store: store, senders: senders, mtop: client, accountTasks: client,
+		grouponRedFlower: client, logger: logger.With("subsys", "automation")}
 }
 
 // SetMTop 注入 mtop 客户端（确认发货用）。未注入时使用默认 HTTP 实现。
 func (c *Center) SetMTop(m mtop.Client) { c.mtop = m }
 
 // SetAccountTaskClient overrides automatic rating/polish transport for tests.
-func (c *Center) SetAccountTaskClient(client AccountTaskClient) { c.accountTasks = client }
+func (c *Center) SetAccountTaskClient(client AccountTaskClient) {
+	c.accountTasks = client
+	// 具体 mtop 客户端通常同时实现账号任务与免拼/小红花契约；按需自动接线。
+	if groupon, ok := client.(GrouponRedFlowerClient); ok {
+		c.grouponRedFlower = groupon
+	}
+}
+
+// SetGrouponRedFlowerClient 单独注入小刀免拼/求小红花客户端。
+func (c *Center) SetGrouponRedFlowerClient(client GrouponRedFlowerClient) {
+	c.grouponRedFlower = client
+}
 
 // SetOrderDetailFetcher 注入订单详情查询能力。
 func (c *Center) SetOrderDetailFetcher(fetcher OrderDetailFetcher) {
@@ -197,6 +211,14 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		rules, err = c.store.Automation.Match(ctx, task.AccountID, task.ItemID, task.TriggerType)
 		if err != nil {
 			return false, err
+		}
+	}
+	// 小刀（砍价成团）卡片的价值在于"免拼发货"，而不是匹配发货规则：
+	// 免拼由账号级开关控制，发生在规则匹配之前，且失败不影响后续正常发货。
+	if task.TriggerType == TriggerBargain {
+		if fsErr := c.FreeshippingForOrder(ctx, task.AccountID, task.OrderID, task.ItemID, task.BuyerID); fsErr != nil {
+			c.logger.Warn("小刀订单免拼发货失败，继续尝试正常发货", "account", task.AccountID,
+				"order_id", task.OrderID, "err", fsErr)
 		}
 	}
 	if len(rules) == 0 {
