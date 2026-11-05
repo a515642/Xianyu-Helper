@@ -442,6 +442,12 @@ func (c *Center) executeRule(ctx context.Context, task Task, rule db.AutomationR
 	if err != nil {
 		return &preparationError{err: err}
 	}
+	// 付款自动发货必须有正数成交金额；服务预约单等 ¥0 订单不能发卡密。
+	if task.TriggerType == TriggerOrderPaid && task.OrderID != "" {
+		if reason := c.paidAmountBlockedReason(task.Amount); reason != "" {
+			return c.skipPaidRunForBlockedAmount(ctx, task, reason)
+		}
+	}
 	triggerKey := buildTriggerKey(task)
 	if triggerKey == "" {
 		return nil
@@ -815,6 +821,69 @@ func mergeOrderIntoTask(task Task, order *db.Order) Task {
 		task.OrderStatus = order.OrderStatus
 	}
 	return task
+}
+
+// 付款自动发货的成交金额门禁。金额无法证明为严格正数时不得发卡密、确认发货或触发人工告警。
+const (
+	reasonOrderAmountNotPositive = "order_amount_not_positive"
+	reasonOrderAmountMissing     = "order_amount_missing"
+)
+
+// paidAmountBlockedReason 返回空字符串表示允许自动发货；否则返回拦截原因。
+// raw 是订单事实中的金额文本（可带 ¥ 前缀与千位分隔符）。
+func (c *Center) paidAmountBlockedReason(raw string) string {
+	normalized, valid := db.NormalizeOrderAmount(raw)
+	if !valid {
+		return reasonOrderAmountNotPositive
+	}
+	if normalized == "" {
+		// 没有详情查询器时无法补全金额，保持原有行为；有查询器却补全后仍缺失，则按无法证明为正数处理。
+		if c.fetcher == nil {
+			return ""
+		}
+		return reasonOrderAmountMissing
+	}
+	// 逐字符检查是否含 1-9 的有效数字；全为 0 与小数点即为零金额。
+	for _, digit := range normalized {
+		if digit >= '1' && digit <= '9' {
+			return ""
+		}
+	}
+	return reasonOrderAmountNotPositive
+}
+
+// skipPaidRunForBlockedAmount 在金额门禁命中时收口付款任务：
+// 新事件直接跳过；零进度运行取消；已有发送进度的运行转人工核对并保留发送计数。
+func (c *Center) skipPaidRunForBlockedAmount(ctx context.Context, task Task, reason string) error {
+	resumeID := taskAutomationRunID(task)
+	if resumeID <= 0 {
+		c.logger.Info("订单金额不是正数，跳过付款自动发货", "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
+		return nil
+	}
+	run, err := c.store.Automation.GetRun(ctx, resumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if run.Status != "running" {
+		return nil
+	}
+	if run.SentCount == 0 && run.ActionCursor == 0 && !run.ActionStarted {
+		cancelReason := "订单金额不是正数（" + reason + "），不自动发货"
+		if err := c.store.Automation.FinishRun(ctx, run.ID, run.AttemptCount, "canceled", 0, cancelReason); err != nil {
+			return fmt.Errorf("取消零金额付款运行: %w", err)
+		}
+		c.logger.Info("订单金额不是正数，取消尚未执行动作的付款运行", "run_id", run.ID, "account", task.AccountID, "order_id", task.OrderID, "reason", reason)
+		return nil
+	}
+	reasonText := "订单金额不是正数（" + reason + "），付款发货已有进度，已停止自动重放，请人工核对"
+	if err := c.store.Automation.QuarantineRunResult(ctx, run.ID, run.AttemptCount, run.SentCount, reasonText); err != nil {
+		return fmt.Errorf("保存零金额付款运行人工核对状态: %w", err)
+	}
+	c.notifyRunNeedsReview(*run, reasonText)
+	return nil
 }
 
 func (c *Center) executeAction(ctx context.Context, task Task, action db.AutomationAction) (int, error) {

@@ -879,7 +879,7 @@ func TestCenterOrderPaidDoesNotConfirmWhenNoCardSpecMatches(t *testing.T) {
 
 	sender := &testSender{}
 	center := New(store, testSenderProvider{sender: sender}, nil)
-	center.SetOrderDetailFetcher(testFetcher{detail: &OrderDetail{SpecName: "套餐", SpecValue: "90天", Quantity: "1"}})
+	center.SetOrderDetailFetcher(testFetcher{detail: &OrderDetail{SpecName: "套餐", SpecValue: "90天", Quantity: "1", Amount: "9.90"}})
 
 	err = center.HandleTask(ctx, Task{
 		Source: "ws", AccountID: "cid", CookieStr: "unb=123; _m_h5_tk=tk_1;", TriggerType: TriggerOrderPaid,
