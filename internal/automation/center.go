@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"xianyu-go/internal/chatsend"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/deliverytemplate"
 	"xianyu-go/internal/xianyu/cookierefresh"
@@ -1223,6 +1224,8 @@ func (c *Center) cardContent(ctx context.Context, card *db.CardFull) (text, imag
 }
 
 func (c *Center) sendText(ctx context.Context, task Task, text string) error {
+	// 自动化发送属于机器发送，不能让 AI 助手误判为真人卖家接管。
+	ctx = chatsend.WithAuto(ctx)
 	if task.ChatID == "" || task.BuyerID == "" {
 		return fmt.Errorf("%w: 发送消息缺少 chat_id 或 buyer_id", ErrMessageNotSent)
 	}
@@ -1237,6 +1240,7 @@ func (c *Center) sendText(ctx context.Context, task Task, text string) error {
 }
 
 func (c *Center) sendImage(ctx context.Context, task Task, imageURL string, cardID int64) error {
+	ctx = chatsend.WithAuto(ctx)
 	if task.ChatID == "" || task.BuyerID == "" {
 		return fmt.Errorf("%w: 发送图片缺少 chat_id 或 buyer_id", ErrMessageNotSent)
 	}

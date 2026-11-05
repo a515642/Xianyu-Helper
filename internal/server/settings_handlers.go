@@ -16,6 +16,7 @@ import (
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/logging"
 	"xianyu-go/internal/netguard"
+	"xianyu-go/internal/xianyu/aiendpoint"
 )
 
 const maxOpenAIModelsResponseBytes = 4 << 20
@@ -33,6 +34,7 @@ func (s *Server) mountSettingsReal(r chi.Router) {
 		r.Put("/system-settings", s.setSettings)
 		r.Put("/system-settings/{key}", s.setSetting)
 		r.Post("/ai-models", s.listAIModels)
+		r.Post("/ai-test", s.testAIConnection)
 	})
 }
 
@@ -250,9 +252,12 @@ func (s *Server) listAIModels(w http.ResponseWriter, r *http.Request) {
 		}
 		baseURL = v
 	}
-	if baseURL == "" {
-		baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	normalized, normErr := aiendpoint.NormalizeBaseURL(baseURL)
+	if normErr != nil {
+		writeErr(w, http.StatusBadRequest, normErr.Error())
+		return
 	}
+	baseURL = normalized
 	apiKey := strings.TrimSpace(req.APIKey)
 	if apiKey == "" {
 		v, err := s.Store.Settings.Get(r.Context(), "ai_api_key")
@@ -276,10 +281,11 @@ var newSettingsOutboundHTTPClient = func(baseURL string) (*http.Client, error) {
 }
 
 func fetchOpenAIModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		return nil, fmt.Errorf("AI API 地址为空")
+	normalized, err := aiendpoint.NormalizeBaseURL(baseURL)
+	if err != nil {
+		return nil, err
 	}
+	baseURL = normalized
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
 		return nil, err

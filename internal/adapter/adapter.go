@@ -188,8 +188,27 @@ func (a *Adapter) HandleOutgoingChatMessage(ctx context.Context, message engine.
 	if a.chat == nil {
 		return nil
 	}
-	_, err := a.chat.RecordOutgoingSent(ctx, db.ChatSession{CookieID: message.AccountID, ChatID: message.ChatID,
-		BuyerID: message.BuyerID}, message.MessageKey, message.Text)
+	session := db.ChatSession{CookieID: message.AccountID, ChatID: message.ChatID, BuyerID: message.BuyerID}
+	// AI 助手/自动化的发送标记为 ai- 前缀，避免把自己的回复误判成"真人卖家"而停止服务。
+	if message.Auto {
+		_, err := a.chat.RecordAutoOutgoingSent(ctx, session, message.Text)
+		return err
+	}
+	_, err := a.chat.RecordOutgoingSent(ctx, session, message.MessageKey, message.Text)
+	return err
+}
+
+// RecordChatEcho 持久化账号自身经 WS 回显的聊天消息，作为"真人正在使用账号"的
+// 事实依据，供 AI 助手在让位窗口内保持沉默。回显消息不进入自动回复链。
+func (a *Adapter) RecordChatEcho(ctx context.Context, echo engine.ChatEcho) error {
+	if a.chat == nil {
+		return nil
+	}
+	if strings.TrimSpace(echo.Text) == "" {
+		return nil
+	}
+	_, _, err := a.chat.RecordSelfEcho(ctx, db.ChatSession{CookieID: echo.AccountID, ChatID: echo.ChatID,
+		BuyerID: echo.BuyerID}, echo.MessageID, echo.MessageType, echo.Text, echo.SentAt)
 	return err
 }
 

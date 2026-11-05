@@ -22,14 +22,11 @@ import (
 
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/netguard"
+	"xianyu-go/internal/xianyu/aiendpoint"
 	"xianyu-go/internal/xianyu/mtop"
 )
 
-const (
-	defaultAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	defaultAIModel   = "qwen-plus"
-	aiRequestTimeout = 2 * time.Minute
-)
+const aiRequestTimeout = 2 * time.Minute
 
 var newAIHTTPClient = func(baseURL string) (*http.Client, error) {
 	return netguard.TrustedEndpointHTTPClient(baseURL, aiRequestTimeout)
@@ -121,11 +118,16 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 }
 
 func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool) (*ReplyResult, error) {
-	// 调 OpenAI 兼容接口。
-	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
-	if aiCfg.BaseURL != "" {
-		clientCfg.BaseURL = aiCfg.BaseURL
+	// 调 OpenAI 兼容接口。地址为空时不回退 SDK 默认服务商（那会把买家消息发到
+	// 用户没有配置的地址），直接报错要求先配置。
+	if strings.TrimSpace(aiCfg.BaseURL) == "" {
+		return nil, errors.New("未配置 AI API 地址，请先在系统设置或该 AI 助手里填写")
 	}
+	if strings.TrimSpace(aiCfg.Model) == "" {
+		return nil, errors.New("未选择 AI 模型，请先在系统设置或该 AI 助手里填写")
+	}
+	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
+	clientCfg.BaseURL = aiCfg.BaseURL
 	var err error
 	clientCfg.HTTPClient, err = newAIHTTPClient(clientCfg.BaseURL)
 	if err != nil {
@@ -431,7 +433,9 @@ func (a *AIReplierImpl) effectiveAIConfig(ctx context.Context, profile *db.AIPro
 		global.APIKey = strings.TrimSpace(profile.APIKey)
 	}
 	if strings.TrimSpace(profile.BaseURL) != "" {
-		global.BaseURL = strings.TrimRight(strings.TrimSpace(profile.BaseURL), "/")
+		if normalized, normErr := aiendpoint.NormalizeBaseURL(profile.BaseURL); normErr == nil {
+			global.BaseURL = normalized
+		}
 	}
 	if strings.TrimSpace(profile.ModelName) != "" {
 		global.Model = strings.TrimSpace(profile.ModelName)
@@ -464,14 +468,17 @@ func (a *AIReplierImpl) globalAIConfig(ctx context.Context) (*globalAIConfig, er
 		return nil, err
 	}
 
+	// 这里只做规范化：空地址保持为空，是否报错交给真正发起请求的 replyWithPrompt，
+	// 以便单个 AI 助手自带的地址仍然可用。
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		baseURL = defaultAIBaseURL
+	if baseURL != "" {
+		normalized, normErr := aiendpoint.NormalizeBaseURL(baseURL)
+		if normErr != nil {
+			return nil, normErr
+		}
+		baseURL = normalized
 	}
 	model = strings.TrimSpace(model)
-	if model == "" {
-		model = defaultAIModel
-	}
 	if strings.EqualFold(strings.TrimSpace(thinkingMode), "enabled") {
 		thinkingMode = "enabled"
 	} else {

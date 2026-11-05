@@ -558,6 +558,43 @@ func findOfficialContentType(value any) string {
 	return found
 }
 
+// RecordSelfEcho 记录账号自身发出、经 WebSocket 回显的聊天消息。
+// 这类消息代表"当前正在用账号的人"（真人卖家或官方客户端）的真实发送，
+// 是 AI 助手让位的依据；带 ai- 前缀的自动发送在入库前已单独处理，不会走到这里。
+func (s *Service) RecordSelfEcho(ctx context.Context, session db.ChatSession, messageKey, messageType, content string, sentAt int64) (*db.ChatMessage, bool, error) {
+	if s == nil || s.store == nil || s.store.Chats == nil {
+		return nil, false, fmt.Errorf("聊天服务未初始化")
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, false, nil
+	}
+	if sentAt == 0 {
+		sentAt = time.Now().UTC().UnixMilli()
+	}
+	// 本后台发送的消息已经在发送时入库，平台回显会再次到达，这里按内容去重。
+	if dup, dupErr := s.store.Chats.HasRecentOutgoingContent(ctx, session.CookieID, session.ChatID,
+		content, time.Now().UTC().UnixMilli()-2*60*1000); dupErr == nil && dup {
+		return nil, false, nil
+	}
+	key := strings.TrimSpace(messageKey)
+	if key == "" {
+		key = "echo-" + randomID()
+	} else {
+		key = "echo-" + key
+	}
+	if strings.TrimSpace(messageType) == "" {
+		messageType = "text"
+	}
+	message := db.ChatMessage{MessageKey: key, Direction: "outgoing", SenderID: session.CookieID,
+		SenderName: "我", MessageType: messageType, Content: content, Status: "sent", SentAt: sentAt}
+	stored, inserted, err := s.store.Chats.SaveMessage(ctx, session, message, false)
+	if err == nil && inserted {
+		s.Publish(session.CookieID, Event{Type: "message.created", Message: stored, Session: &session})
+	}
+	return stored, inserted, err
+}
+
 func (s *Service) CreateOutgoing(ctx context.Context, session db.ChatSession, text string) (*db.ChatMessage, error) {
 	return s.CreateOutgoingMedia(ctx, session, "text", strings.TrimSpace(text))
 }
@@ -576,6 +613,19 @@ func (s *Service) CreateOutgoingMedia(ctx context.Context, session db.ChatSessio
 
 // RecordOutgoingSent captures automatic replies and automation messages. A
 // supplied key correlates a UI pending message and only updates its status.
+// RecordAutoOutgoingSent 记录 AI 助手/自动化发送的出站消息，message_key 带
+// ai- 前缀，以便与真人手动发送区分（真人发送才会触发 AI 让位）。
+func (s *Service) RecordAutoOutgoingSent(ctx context.Context, session db.ChatSession, text string) (*db.ChatMessage, error) {
+	message := db.ChatMessage{MessageKey: "ai-" + randomID(), Direction: "outgoing", SenderID: session.CookieID,
+		SenderName: "AI助手", MessageType: "text", Content: strings.TrimSpace(text), Status: "sent",
+		SentAt: time.Now().UTC().UnixMilli()}
+	stored, _, err := s.store.Chats.SaveMessage(ctx, session, message, false)
+	if err == nil {
+		s.Publish(session.CookieID, Event{Type: "message.created", Message: stored, Session: &session})
+	}
+	return stored, err
+}
+
 func (s *Service) RecordOutgoingSent(ctx context.Context, session db.ChatSession, key, text string) (*db.ChatMessage, error) {
 	if strings.TrimSpace(key) != "" {
 		return s.SetOutgoingStatus(ctx, session.CookieID, key, "sent")

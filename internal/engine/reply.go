@@ -67,11 +67,40 @@ func NewReplyService(cookieID string, store *db.Store, sender MessageSender,
 	}
 }
 
+// humanTakeoverWindow 是真人卖家最后一条消息之后的静默期：期间买家消息不再由
+// AI 助手回复，避免与真人卖家在回复上形成竞态。
+const humanTakeoverWindow = 5 * time.Minute
+
+// humanTakeoverActive 判断当前是否应由真人卖家接管（AI 让位）。
+// 让位窗口从"最后一条真人卖家消息"起算，真人持续回复则窗口不断顺延；
+// 窗口内买家消息不回复；买家消息后 5 分钟仍无真人回复时，AI 助手恢复接管。
+// 查询失败时不影响自动回复（返回 false）。
+func (r *ReplyService) humanTakeoverActive(ctx context.Context, m ChatMessage) bool {
+	if r.store == nil || r.store.Chats == nil || m.ChatID == "" {
+		return false
+	}
+	sentAt, ok, err := r.store.Chats.LastSellerOutgoingAt(ctx, r.cookieID, m.ChatID)
+	if err != nil {
+		r.logger.Warn("读取真人卖家最近回复时间失败，按 AI 接管处理", "chat_id", m.ChatID, "err", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	last := time.Unix(0, sentAt*int64(time.Millisecond))
+	return time.Since(last) < humanTakeoverWindow
+}
+
 // Handle 收到一条聊天消息，按四级优先级回复。
 // 由 Account 在防抖后调用。返回是否产生了回复。
 func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	started := time.Now()
 	r.logger.Info("AI诊断：消息进入回复链", "chat_id", m.ChatID, "item_id", m.ItemID, "message_kind", classifyAIMessage(m), "text_len", len([]rune(m.Text)))
+	// 真人卖家刚回复过 → AI 让位，跳过本次回复（含关键词/默认回复）。
+	if r.humanTakeoverActive(ctx, m) {
+		r.logger.Info("AI诊断：真人卖家接管中，跳过自动回复", "chat_id", m.ChatID, "item_id", m.ItemID, "window", humanTakeoverWindow.String())
+		return nil
+	}
 	res := r.resolve(ctx, m)
 	if res == nil || res.Skip {
 		r.logger.Info("AI诊断：回复链无发送内容", "chat_id", m.ChatID, "item_id", m.ItemID, "has_result", res != nil, "skip", res != nil && res.Skip, "duration", time.Since(started).Round(time.Millisecond))
@@ -95,6 +124,8 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 			return nil
 		}
 	}
+	// 自动回复必须标记来源：真人手动发送才会触发 AI 让位。
+	ctx = WithAutoSend(ctx)
 	if res.ImageURL != "" && !record.ImageSent {
 		if err := r.sender.SendImage(ctx, m.ChatID, m.SenderUserID, res.ImageURL, 0); err != nil {
 			r.logger.Error("发送回复图片失败", "err", err)

@@ -995,6 +995,20 @@ export const fetchAIModels = async (baseUrl: string, apiKey: string = ''): Promi
   return result.models || [];
 };
 
+export interface AITestResult {
+  success: boolean;
+  endpoint?: string;
+  model?: string;
+  reply?: string;
+  latency_ms?: number;
+  error?: string;
+}
+
+// 用当前（或传入的）AI 配置发送一条 "hi" 做连通性测试。
+export const testAIConnection = async (payload: { base_url?: string; api_key?: string; model?: string }): Promise<AITestResult> => {
+  return post<AITestResult>('/ai-test', payload, { timeoutMs: 60_000 });
+};
+
 // Notification Channels
 const parseNotificationEventTypes = (raw: unknown): NotificationEventType[] => {
   if (Array.isArray(raw)) return raw.filter(Boolean) as NotificationEventType[];

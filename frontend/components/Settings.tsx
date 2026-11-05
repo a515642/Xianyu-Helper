@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   fetchAIModels,
+  testAIConnection,
   getSystemSettings,
   updateLoginCredentials,
   updateSystemSettings,
@@ -9,11 +10,10 @@ import {
 import { SystemSettings } from '../types';
 import {
   Save, Sparkles, Settings as SettingsIcon,
-  Eye, EyeOff, RefreshCw, Database, ChevronDown, Check,
+  Eye, EyeOff, RefreshCw, Database, ChevronDown, Check, PlugZap,
   LockKeyhole, UserRound, ShieldCheck
 } from 'lucide-react';
 
-const DEFAULT_AI_API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 const LOG_LEVELS = [
   { value: 'debug', label: 'Debug' },
@@ -47,6 +47,8 @@ const Settings: React.FC = () => {
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelError, setModelError] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
 
@@ -85,7 +87,7 @@ const Settings: React.FC = () => {
 
   const loadAIModels = async (source?: SystemSettings | null, openAfterLoad = false) => {
     const current = source || settings;
-    const baseUrl = current?.ai_api_url || current?.ai_base_url || DEFAULT_AI_API_URL;
+    const baseUrl = current?.ai_api_url || current?.ai_base_url || '';
     setModelsLoading(true);
     setModelError('');
     try {
@@ -101,6 +103,31 @@ const Settings: React.FC = () => {
       setModelError((e as Error).message || '读取模型失败');
     } finally {
       setModelsLoading(false);
+    }
+  };
+
+  const runAITest = async () => {
+    if (!settings) {
+      setTestResult({ ok: false, text: '请先加载设置' });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await testAIConnection({
+        base_url: settings.ai_api_url || settings.ai_base_url || '',
+        api_key: settings.ai_api_key || '',
+        model: settings.ai_model || '',
+      });
+      const latency = typeof result.latency_ms === 'number' ? `（${result.latency_ms}ms）` : '';
+      setTestResult({
+        ok: true,
+        text: `连接成功${latency}，模型回复：${result.reply || '（空）'}`,
+      });
+    } catch (error) {
+      setTestResult({ ok: false, text: (error as Error).message || '连接失败' });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -277,15 +304,15 @@ const Settings: React.FC = () => {
 
             <div className="ios-card rounded-xl p-6 bg-white space-y-6">
               <div className="space-y-3">
-                <label className="block text-sm font-bold text-gray-800">API 地址</label>
+                <label className="block text-sm font-bold text-gray-800">API 地址（必填）</label>
                 <input
                   type="text"
-                  value={settings.ai_api_url || DEFAULT_AI_API_URL}
+                  value={settings.ai_api_url || ''}
                   onChange={e => setSettings({...settings, ai_api_url: e.target.value})}
                   className="w-full ios-input px-4 py-3 rounded-xl text-sm"
-                  placeholder="https://api.openai.com/v1"
+                  placeholder="https://api.openai.com"
                 />
-                <p className="text-xs text-gray-500">无需补全 /chat/completions</p>
+                <p className="text-xs text-gray-500">只填域名即可，系统会自动补全 /v1/chat/completions；已带路径的地址原样使用。</p>
               </div>
 
               <div className="space-y-3">
@@ -309,7 +336,7 @@ const Settings: React.FC = () => {
               </div>
 
               <div className="space-y-3">
-                <label className="block text-sm font-bold text-gray-800">模型</label>
+                <label className="block text-sm font-bold text-gray-800">模型（必填）</label>
                 <div ref={modelPickerRef} className="relative flex flex-col sm:flex-row gap-2">
                   <div className="relative flex-1">
                     <input
@@ -367,7 +394,20 @@ const Settings: React.FC = () => {
                     <RefreshCw className={`w-4 h-4 ${modelsLoading ? 'animate-spin' : ''}`} />
                     读取模型
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void runAITest()}
+                    disabled={testing}
+                    title="发送一条 hi 测试 AI 连通性"
+                    className="px-4 py-3 rounded-xl bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-60 font-bold flex items-center justify-center gap-2 whitespace-nowrap"
+                  >
+                    {testing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PlugZap className="w-4 h-4" />}
+                    测试连接
+                  </button>
                 </div>
+                {testResult && (
+                  <p className={`text-xs ${testResult.ok ? 'text-green-600' : 'text-red-500'}`}>{testResult.text}</p>
+                )}
                 {modelError ? (
                   <p className="text-xs text-red-500">{modelError}</p>
                 ) : (
@@ -382,8 +422,8 @@ const Settings: React.FC = () => {
               <div className="p-3 bg-blue-50 rounded-xl text-xs text-blue-700">
                 <strong>常见 AI 服务:</strong>
                 <ul className="list-disc list-inside mt-1 space-y-0.5">
-                  <li>阿里云通义千问: https://dashscope.aliyuncs.com/compatible-mode/v1</li>
-                  <li>OpenAI: https://api.openai.com/v1</li>
+                  <li>阿里云通义千问: https://dashscope.aliyuncs.com</li>
+                  <li>OpenAI: https://api.openai.com</li>
                 </ul>
               </div>
             </div>

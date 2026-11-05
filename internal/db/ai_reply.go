@@ -56,12 +56,7 @@ func (a *AIReply) Get(ctx context.Context, cookieID string) (*AIReplySettings, e
 		return nil, err
 	}
 	s.CustomPrompts = customPrompts.String
-	if s.ModelName == "" {
-		s.ModelName = "qwen-plus"
-	}
-	if s.BaseURL == "" {
-		s.BaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	}
+	// 不再回填默认 Base URL / 模型名：未配置时保持为空，由调用方明确报错。
 	return &s, nil
 }
 

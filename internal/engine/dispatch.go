@@ -94,7 +94,28 @@ func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string
 		return
 	}
 	if senderUserID := extractChatSenderUserID(decrypted); isSelfUserID(senderUserID, protocol.TransCookies(a.currentCookieStr())["unb"]) {
-		a.logger.Info("忽略账号自身发送的 WebSocket 聊天回显", "chat_id", extractChatID(decrypted), "sender_id", senderUserID)
+		// 账号自身发出的消息（真人卖家在官方客户端/本后台发送）经 WS 回显。
+		// 它们不进入自动回复链，但必须作为"真人在用账号"的事实记录下来，
+		// 否则 AI 助手无法判断何时应该让位。AI/自动化发送的 key 带 ai- 前缀，会被识别为机器发送。
+		key := extractMessageID(decrypted)
+		isAuto := strings.HasPrefix(strings.TrimSpace(key), "ai-")
+		a.logger.Info("账号自身聊天回显", "chat_id", extractChatID(decrypted), "sender_id", senderUserID,
+			"message_id", truncID(key), "auto", isAuto)
+		echoType := extractSelfEchoMessageType(decrypted)
+		if !isAuto && echoType != "system" {
+			if observer, ok := a.handler.(ChatEchoHandler); ok {
+				echo := ChatEcho{
+					AccountID: a.CookieID, ChatID: extractChatID(decrypted), BuyerID: extractSelfEchoBuyerID(decrypted),
+					Text: extractSelfEchoText(decrypted), MessageID: key,
+					MessageType: echoType, SentAt: extractSelfEchoSentAt(decrypted),
+				}
+				if echo.Text != "" {
+					if err := observer.RecordChatEcho(ctx, echo); err != nil {
+						a.logger.Warn("记录账号自身聊天回显失败", "chat_id", echo.ChatID, "err", err)
+					}
+				}
+			}
+		}
 		return
 	}
 
@@ -480,6 +501,78 @@ func extractChatMessage(decrypted map[string]any, accountID, cookieStr string) *
 		ItemID:       itemID,
 		Raw:          decrypted,
 	}
+}
+
+// extractSelfEchoBuyerID 取自身回显消息的收件买家 ID。
+func extractSelfEchoBuyerID(decrypted map[string]any) string {
+	m1, _ := decrypted["1"].(map[string]any)
+	m10, _ := m1["10"].(map[string]any)
+	if m10 == nil {
+		return ""
+	}
+	for _, key := range []string{"receiverUserId", "receiverId", "toUserId", "buyerId"} {
+		if id := strings.TrimSpace(toString(m10[key])); id != "" && id != "<nil>" {
+			return strings.TrimSuffix(id, "@goofish")
+		}
+	}
+	// 回显消息的发送者就是本账号，取不到收件人时宁可留空，也不能把卖家自己
+	// 写成买家，否则会污染会话的 buyer_id。
+	return ""
+}
+
+// extractSelfEchoText 取自身回显消息的文本内容。
+func extractSelfEchoText(decrypted map[string]any) string {
+	m1, _ := decrypted["1"].(map[string]any)
+	m10, _ := m1["10"].(map[string]any)
+	if m10 == nil {
+		return ""
+	}
+	for _, key := range []string{"reminderContent", "sendContent", "content", "text"} {
+		if text := strings.TrimSpace(toString(m10[key])); text != "" && text != "<nil>" {
+			return text
+		}
+	}
+	return ""
+}
+
+// extractSelfEchoMessageType 取自身回显消息的类型（把平台消息类型映射为本系统类型）。
+func extractSelfEchoMessageType(decrypted map[string]any) string {
+	m1, _ := decrypted["1"].(map[string]any)
+	m10, _ := m1["10"].(map[string]any)
+	if m10 == nil {
+		return "text"
+	}
+	contentType := strings.TrimSpace(toString(m10["contentType"]))
+	switch contentType {
+	case "2", "3":
+		return "image"
+	case "26", "14":
+		// 交易卡片/系统提醒不属于真人聊天内容。
+		return "system"
+	}
+	if strings.TrimSpace(toString(m10["reminderContent"])) == "" && strings.TrimSpace(toString(m10["content"])) != "" {
+		return "image"
+	}
+	return "text"
+}
+
+// extractSelfEchoSentAt 取自身回显消息的发送时间（毫秒）。
+func extractSelfEchoSentAt(decrypted map[string]any) int64 {
+	m1, _ := decrypted["1"].(map[string]any)
+	m10, _ := m1["10"].(map[string]any)
+	if m10 == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(toString(m10["sendTime"]))
+	if raw == "" {
+		return 0
+	}
+	var value int64
+	_, _ = fmt.Sscan(raw, &value)
+	if value > 0 && value < 10_000_000_000 {
+		value *= 1000
+	}
+	return value
 }
 
 func extractChatSenderUserID(decrypted map[string]any) string {

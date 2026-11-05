@@ -78,7 +78,7 @@ CREATE INDEX idx_keywords_cookie_id ON keywords(cookie_id);
 CREATE TABLE IF NOT EXISTS ai_reply_settings (
     cookie_id VARCHAR(255) PRIMARY KEY,
     ai_enabled TINYINT(1) DEFAULT 0,
-    model_name VARCHAR(255) DEFAULT 'qwen-plus',
+    model_name VARCHAR(255) DEFAULT '',
     api_key TEXT,
     base_url VARCHAR(512) DEFAULT 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     max_discount_percent INTEGER DEFAULT 10,

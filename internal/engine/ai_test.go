@@ -78,11 +78,11 @@ func newAIStore(t *testing.T) (*db.Store, func()) {
 func enableTestAI(t *testing.T, s *db.Store, baseURL string, profileName string) int64 {
 	t.Helper()
 	ctx := context.Background()
-	id, err := s.AIProfiles.Create(ctx, db.AIProfile{CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1})
+	id, err := s.AIProfiles.Create(ctx, db.AIProfile{CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, ModelName: "test-model", BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AIProfiles.Update(ctx, db.AIProfile{ID: id, CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, BaseURL: baseURL, BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1}, strPtr("sk-test"), false); err != nil {
+	if err := s.AIProfiles.Update(ctx, db.AIProfile{ID: id, CookieID: "cid", Name: profileName, Enabled: true, UseSystemAPI: false, BaseURL: baseURL, ModelName: "test-model", BargainStrategyEnabled: true, MaxDiscountPercent: 10, MaxDiscountAmount: 20, MaxBargainRounds: 1}, strPtr("sk-test"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AIProfiles.ReplaceItems(ctx, id, "cid", []string{"item1"}); err != nil {
@@ -316,13 +316,21 @@ func TestGlobalAIConfig(t *testing.T) {
 	ctx := context.Background()
 	a := NewAIReplier("cid", s, nil)
 
-	// 全空 → 默认 BaseURL + Model。
+	// 全空 → 地址与模型都保持为空，不再回填任何默认值。
 	cfg, err := a.globalAIConfig(ctx)
 	if err != nil {
 		t.Fatalf("globalAIConfig: %v", err)
 	}
-	if cfg.BaseURL != defaultAIBaseURL || cfg.Model != defaultAIModel || cfg.APIKey != "" {
+	if cfg.Model != "" || cfg.BaseURL != "" || cfg.APIKey != "" {
 		t.Fatalf("默认值异常: %+v", cfg)
+	}
+	// 未配置地址/模型时应由 replyWithPrompt 明确报错，而不是偷偷用默认服务商或模型。
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, cfg, "", 0, "", nil, 0, "sys", false); replyErr == nil {
+		t.Fatal("未配置 AI 地址时应报错")
+	}
+	emptyCfg := &globalAIConfig{APIKey: "sk-x", BaseURL: "http://127.0.0.1:1"}
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, emptyCfg, "", 0, "", nil, 0, "sys", false); replyErr == nil {
+		t.Fatal("未配置模型时应报错")
 	}
 
 	// 显式设置。

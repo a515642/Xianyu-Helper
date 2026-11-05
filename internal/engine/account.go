@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"xianyu-go/internal/automation"
+	"xianyu-go/internal/chatsend"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/cookierefresh"
 	"xianyu-go/internal/xianyu/mtop"
@@ -96,6 +97,23 @@ type MessageReadEvent struct {
 	ReadAt    int64
 }
 
+// ChatEcho 是账号自身经 WS 回显的聊天消息（真人在官方客户端或本后台发送）。
+// 它不进入自动回复链，只作为"真人正在使用账号"的事实依据，供 AI 助手让位判断。
+type ChatEcho struct {
+	AccountID   string
+	ChatID      string
+	BuyerID     string
+	Text        string
+	MessageID   string
+	MessageType string
+	SentAt      int64
+}
+
+// ChatEchoHandler 由 Adapter 实现，用于持久化账号自身的聊天回显。
+type ChatEchoHandler interface {
+	RecordChatEcho(ctx context.Context, echo ChatEcho) error
+}
+
 type accountEventHandler interface {
 	OnAccountEvent(ctx context.Context, cookieID, eventType, level, title, body string)
 }
@@ -148,6 +166,8 @@ type OutgoingChatMessage struct {
 	BuyerID    string
 	Text       string
 	MessageKey string
+	// Auto 表示这条出站消息来自 AI 助手或自动化发送（非真人手动发送）。
+	Auto bool
 }
 
 type outgoingChatHandler interface {
@@ -155,6 +175,16 @@ type outgoingChatHandler interface {
 }
 
 type outgoingMessageKeyContextKey struct{}
+
+// WithAutoSend 标记本次发送来自 AI 助手或自动化，而非真人手动发送。
+// 真人手动回复才会让 AI 助手暂时让位，必须把两者区分开。
+func WithAutoSend(ctx context.Context) context.Context {
+	return chatsend.WithAuto(ctx)
+}
+
+func isAutoSendContext(ctx context.Context) bool {
+	return chatsend.IsAuto(ctx)
+}
 
 // WithOutgoingMessageKey correlates a UI-created pending message with the
 // post-send observer so the same text is not inserted twice.
@@ -1829,6 +1859,7 @@ func (a *Account) SendText(ctx context.Context, chatID, toUserID, text string) e
 		key, _ := ctx.Value(outgoingMessageKeyContextKey{}).(string)
 		if err := observer.HandleOutgoingChatMessage(ctx, OutgoingChatMessage{
 			AccountID: a.CookieID, ChatID: chatID, BuyerID: toUserID, Text: text, MessageKey: key,
+			Auto: isAutoSendContext(ctx),
 		}); err != nil {
 			a.logger.Warn("保存出站聊天旁路失败", "account", a.CookieID, "chat_id", chatID, "err", err)
 		}
