@@ -48,6 +48,8 @@ jobs:
 
   desktop:
     name: 构建桌面端安装包
+    # 默认只发布 Docker 版本；配置签名 secrets 后设置仓库变量 RELEASE_DESKTOP=true 启用桌面端。
+    if: vars.RELEASE_DESKTOP == 'true'
     needs: prepare
     uses: ./.github/workflows/desktop-cd.yml
     with:
@@ -68,6 +70,12 @@ jobs:
       - prepare
       - desktop
       - docker
+    # 桌面端被跳过时仍继续发布 Docker 版本。
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.docker.result == 'success' &&
+      (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
     runs-on: ubuntu-24.04
     environment:
       name: production-release
@@ -86,6 +94,7 @@ jobs:
         shell: bash
         env:
           APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+          RELEASE_DESKTOP: ${{ vars.RELEASE_DESKTOP }}
         run: |
           set -Eeuo pipefail
           mkdir -p dist/release dist/digests
@@ -93,21 +102,24 @@ jobs:
           echo "下载后的构建产物："
           find dist/artifacts -maxdepth 2 -type f -printf '%P\n' | sort
 
-          expected_release_files=(
-            "ydisks-xianyu-helper-linux-amd64-$APP_VERSION.tar.gz"
-            "ydisks-xianyu-helper-linux-arm64-$APP_VERSION.tar.gz"
-            "Xianyu-Helper-Setup.exe"
-            "Xianyu-Helper-$APP_VERSION-arm64.pkg"
-            "Xianyu-Helper-$APP_VERSION-amd64.pkg"
-          )
-          for release_file in "${expected_release_files[@]}"; do
-            source_file="dist/artifacts/$release_file"
-            if [ ! -f "$source_file" ]; then
-              echo "缺少正式发布产物：$release_file" >&2
-              exit 1
-            fi
-            cp -- "$source_file" dist/release/
-          done
+          # 未启用桌面端发布时只校验 Docker 镜像摘要。
+          if [ "${RELEASE_DESKTOP:-}" = "true" ]; then
+            expected_release_files=(
+              "ydisks-xianyu-helper-linux-amd64-$APP_VERSION.tar.gz"
+              "ydisks-xianyu-helper-linux-arm64-$APP_VERSION.tar.gz"
+              "Xianyu-Helper-Setup.exe"
+              "Xianyu-Helper-$APP_VERSION-arm64.pkg"
+              "Xianyu-Helper-$APP_VERSION-amd64.pkg"
+            )
+            for release_file in "${expected_release_files[@]}"; do
+              source_file="dist/artifacts/$release_file"
+              if [ ! -f "$source_file" ]; then
+                echo "缺少正式发布产物：$release_file" >&2
+                exit 1
+              fi
+              cp -- "$source_file" dist/release/
+            done
+          fi
 
           digest_count=0
           while IFS= read -r artifact_file; do
@@ -126,7 +138,9 @@ jobs:
           find dist/release -maxdepth 1 -type f -printf '%f\n' | sort
           echo "准备发布的 Docker 摘要："
           find dist/digests -maxdepth 1 -type f -printf '%f\n' | sort
-          (cd dist/release && sha256sum * > SHA256SUMS)
+          if [ -n "$(find dist/release -maxdepth 1 -type f -print -quit)" ]; then
+            (cd dist/release && sha256sum * > SHA256SUMS)
+          fi
 
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -169,7 +183,11 @@ jobs:
           set -Eeuo pipefail
           mapfile -t release_files < <(find dist/release -maxdepth 1 -type f -print | sort)
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
+            if [ "${#release_files[@]}" -gt 0 ]; then
+              gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
+            else
+              echo "本次未构建桌面安装包，跳过 Release 附件上传。"
+            fi
           else
             gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
               --verify-tag \
