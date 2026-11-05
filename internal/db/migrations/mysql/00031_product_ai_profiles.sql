@@ -46,8 +46,10 @@ CREATE TABLE IF NOT EXISTS ai_forbidden_words (
 ) ENGINE=InnoDB;
 
 ALTER TABLE ai_conversations ADD COLUMN ai_profile_id BIGINT NOT NULL DEFAULT 0;
+-- utf8mb4 下 3 个 VARCHAR(255) 全宽索引超过 3072 字节上限，按会话/商品 ID
+-- 的实际长度使用前缀索引。
 CREATE INDEX idx_ai_conversations_profile_context
-    ON ai_conversations(ai_profile_id, cookie_id, chat_id, item_id, id);
+    ON ai_conversations(ai_profile_id, cookie_id(128), chat_id(128), item_id(128), id);
 -- +goose StatementEnd
 
 -- +goose Down
