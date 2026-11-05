@@ -4,7 +4,7 @@
 
 系统级连接在“系统与 AI”设置，仅管理员可修改：
 
-1. 填写 OpenAI 兼容的 API 地址，填到版本根路径即可，例如 `https://api.openai.com/v1` 或通义兼容地址 `https://dashscope.aliyuncs.com/compatible-mode/v1`；不要填 `/chat/completions`。
+1. 填写 OpenAI 兼容的 API 地址：**只填域名即可**，例如 `https://api.openai.com`、`https://api.deepseek.com`；系统会自动补全 `/v1/chat/completions`。已带路径的地址（如 `https://dashscope.aliyuncs.com/compatible-mode/v1`）会原样使用。系统不再提供默认地址，必须自行填写；填好后可点「测试连接」发一条 hi 验证。
 2. 填入 API Key，点击“读取模型”。若服务不支持模型列表，也可手动填模型名。
 3. 保存系统设置。API Key 会作为敏感字段保存；仍应限制数据库和管理员访问。
 4. 前往“账号管理”，在目标账号行打开“AI 设置”。
