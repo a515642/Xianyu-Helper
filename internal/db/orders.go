@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var orderAmountPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`)
@@ -15,7 +16,7 @@ var groupedOrderAmountPattern = regexp.MustCompile(`^[0-9]{1,3}(?:,[0-9]{3})+(?:
 
 var ErrOrderConflict = errors.New("订单被并发更新，请重试")
 
-const maxOrderUpsertRetries = 5
+const maxOrderUpsertRetries = 20
 
 // Order 对应 orders 表。
 type Order struct {
@@ -199,6 +200,14 @@ func upsertOrder(ctx context.Context, execer sqlQueryExecer, dialect Dialect, or
 		}
 		if n == 1 {
 			return nil
+		}
+		// 冲突时短暂退避，避免并发写入方在同一读-改-写窗口反复相撞。
+		if attempt+1 < maxOrderUpsertRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * time.Millisecond):
+			}
 		}
 	}
 	return ErrOrderConflict
