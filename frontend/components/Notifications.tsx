@@ -158,6 +158,7 @@ const NOTIFICATION_EVENTS: { value: NotificationEventType; label: string; descri
   { value: 'account_disabled', label: '禁用通知', description: '连续失败、账密错误等导致账号停用' },
   { value: 'security_verification', label: '风控验证', description: '滑块、人脸、扫码验证等安全校验' },
   { value: 'delivery_result', label: '交易通知', description: '订单发货、卡密发送等交易结果' },
+  { value: 'human_handoff', label: '转人工通知', description: 'AI 助手请求真人卖家介入处理' },
   { value: 'token_renewal', label: '续期通知', description: 'Cookie/token 续期和自动恢复过程' },
   { value: 'system_error', label: '系统错误', description: '后台任务或系统级异常' },
 ];

@@ -26,6 +26,14 @@ type Manager struct {
 	mu       sync.Mutex
 	accounts map[string]*managedAccount
 	runCtx   context.Context
+	notifier engine.HumanHandoffNotifier
+}
+
+// SetNotifier 注入 AI 转人工通知渠道；需在 StartAll 之前调用。
+func (m *Manager) SetNotifier(notifier engine.HumanHandoffNotifier) {
+	m.mu.Lock()
+	m.notifier = notifier
+	m.mu.Unlock()
 }
 
 type managedAccount struct {
@@ -94,11 +102,12 @@ func (m *Manager) Start(ctx context.Context, cookieID, cookieValue string) error
 		}
 	}
 	acc := engine.New(engine.Config{
-		CookieID:  cookieID,
-		CookieStr: cookieValue,
-		Store:     m.store,
-		Handler:   m.handler,
-		Logger:    m.logger,
+		CookieID:      cookieID,
+		CookieStr:     cookieValue,
+		Store:         m.store,
+		Handler:       m.handler,
+		Logger:        m.logger,
+		HumanNotifier: m.notifier,
 	})
 	accCtx, cancel := context.WithCancel(ctx)
 	ma := &managedAccount{

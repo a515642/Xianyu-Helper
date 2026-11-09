@@ -38,6 +38,7 @@ const (
 	EventSecurityVerification = "security_verification"
 	EventTokenRenewal         = "token_renewal"
 	EventDeliveryResult       = "delivery_result"
+	EventHumanHandoff         = "human_handoff"
 	EventSystemError          = "system_error"
 )
 
@@ -108,6 +109,26 @@ func (n *Notifier) NotifyDelivery(accountID, buyerName, buyerID, itemID, message
 			"商品ID": itemID,
 			"聊天ID": fallback(chatID, "未知"),
 			"结果":   message,
+		},
+	})
+}
+
+// NotifyHumanHandoff 发送 AI 转人工通知。向该账号所有已启用渠道发送。
+func (n *Notifier) NotifyHumanHandoff(accountID, buyerName, buyerID, itemID, chatID, reason string) {
+	if strings.TrimSpace(buyerName) == "" {
+		buyerName = "买家"
+	}
+	n.NotifyEvent(context.Background(), NotificationEvent{
+		AccountID: accountID,
+		Type:      EventHumanHandoff,
+		Level:     "warn",
+		Title:     "AI 转人工请求",
+		Body:      reason,
+		Fields: map[string]string{
+			"买家":   fmt.Sprintf("%s (ID: %s)", buyerName, buyerID),
+			"商品ID": itemID,
+			"聊天ID": fallback(chatID, "未知"),
+			"原因":   reason,
 		},
 	})
 }
@@ -284,6 +305,8 @@ func eventLabel(eventType string) string {
 		return "续期通知"
 	case EventDeliveryResult:
 		return "交易通知"
+	case EventHumanHandoff:
+		return "转人工通知"
 	case EventSystemError:
 		return "系统错误"
 	default:

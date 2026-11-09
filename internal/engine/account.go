@@ -350,6 +350,8 @@ type Config struct {
 	Renewer cookieRenewer
 	// WSDialer 可选：用于测试隔离原生 WebSocket 握手。
 	WSDialer WSDialer
+	// HumanNotifier 可选：AI 助手转人工时复用账号通知渠道。
+	HumanNotifier HumanHandoffNotifier
 }
 
 // New 构造单账号运行时（未启动）。
@@ -399,6 +401,9 @@ func New(cfg Config) *Account {
 			AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
 		}); ok {
 			ai.SetOrderPriceAdjuster(adjuster)
+		}
+		if cfg.HumanNotifier != nil {
+			ai.SetHumanHandoffNotifier(cfg.HumanNotifier)
 		}
 		a.reply = NewReplyService(cfg.CookieID, cfg.Store, a, nil, ai, logger)
 		if cfg.Store.WSMessages != nil {

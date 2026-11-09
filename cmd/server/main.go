@@ -269,6 +269,7 @@ func runServer(parent context.Context, opts serverOptions) error {
 	autoCenter.SetOrderDetailFetcher(ap)
 	notifier := notify.New("", store, logger)
 	notifier.Start(ctx)
+	mgr.SetNotifier(notifier)
 	engine.StartAITurnLogRetention(ctx, store, logger)
 	autoCenter.SetNotifier(notifier)
 	ap.SetAutomation(autoCenter)

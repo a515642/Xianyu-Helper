@@ -40,6 +40,9 @@ type AIReplierImpl struct {
 	orderPriceAdjuster interface {
 		AdjustOrderPrice(context.Context, string, string, int64) (*mtop.AdjustPriceResult, error)
 	}
+	humanNotifier HumanHandoffNotifier
+	notifyMu      sync.Mutex
+	notifiedAt    map[string]time.Time
 }
 
 // NewAIReplier 构造。
@@ -54,9 +57,10 @@ func NewAIReplier(cookieID string, store *db.Store, logger *slog.Logger) *AIRepl
 		logger = slog.Default()
 	}
 	return &AIReplierImpl{
-		cookieID: cookieID,
-		store:    store,
-		logger:   logger.With("account", cookieID, "subsys", "ai"),
+		cookieID:   cookieID,
+		store:      store,
+		logger:     logger.With("account", cookieID, "subsys", "ai"),
+		notifiedAt: make(map[string]time.Time),
 	}
 }
 

@@ -492,6 +492,7 @@ export type NotificationEventType =
   | 'security_verification'
   | 'token_renewal'
   | 'delivery_result'
+  | 'human_handoff'
   | 'system_error';
 
 export interface NotificationChannel {

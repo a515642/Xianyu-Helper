@@ -132,6 +132,11 @@ func (a *AIReplierImpl) buildAgentSystemPrompt(ctx context.Context, profile *db.
 - 需要回复买家时调用 send_reply，把内容拆成 1-5 条自然简短的文本消息。
 - 本次无需回复时调用 skip_reply，并简要说明原因。
 - 不要直接输出回复正文；只有工具调用才会发送给买家。`
+	if profile.NotifyHumanEnabled {
+		prompt += "\n- 买家要求人工、涉及售后纠纷或超出商品信息范围时调用 notify_human，通知后仍应正常回复买家。"
+	} else {
+		prompt += "\n\n转人工通知未启用：不要调用 notify_human，按现有信息回复或转述能力边界。"
+	}
 	if profile.BargainStrategyEnabled {
 		prompt += priceSafetyRules(itemPrice, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
 		prompt += "\n请自行判断买家是否在议价；只有确实需要议价时才考虑调用改价工具。"
@@ -149,6 +154,9 @@ func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profi
 	}
 	messages := buildChatMessages(systemPrompt, history, m.Text)
 	tools := []openai.Tool{sendReplyTool(), skipReplyTool()}
+	if profile.NotifyHumanEnabled {
+		tools = append(tools, notifyHumanTool())
+	}
 	toolEnabled := profile.BargainStrategyEnabled && (a.orderPriceAdjuster != nil || options.simulation != nil)
 	if toolEnabled {
 		tools = append(tools, adjustOrderPriceTool())
@@ -265,6 +273,8 @@ func (a *AIReplierImpl) executeAgentTool(ctx context.Context, call openai.ToolCa
 		state.skip = true
 		state.skipReason = strings.TrimSpace(args.Reason)
 		return "已记录：本次不回复", nil
+	case notifyHumanToolName:
+		return a.executeNotifyHuman(m, profile, call.Function.Arguments, options)
 	case adjustOrderPriceToolName:
 		if !profile.BargainStrategyEnabled {
 			return "", errors.New("改价工具未启用")
