@@ -87,6 +87,10 @@ export interface AIProfile {
   max_discount_percent: number;
   max_discount_amount: number;
   max_bargain_rounds: number;
+  reply_mode: 'text' | 'tools';
+  max_tool_rounds: number;
+  agent_prompt: string;
+  notify_human_enabled: boolean;
   item_ids: string[];
 }
 
@@ -112,7 +116,51 @@ export interface AIProfileInput {
   max_discount_percent: number;
   max_discount_amount: number;
   max_bargain_rounds: number;
+  reply_mode: 'text' | 'tools';
+  max_tool_rounds: number;
+  agent_prompt: string;
+  notify_human_enabled: boolean;
   item_ids: string[];
+}
+
+export interface AISimulationToolCall {
+  round: number;
+  tool_name: string;
+  arguments: string;
+  result: string;
+  success: boolean;
+  duration_ms: number;
+}
+
+export interface AISimulationResult {
+  session_id: string;
+  reply_text: string;
+  segments: string[];
+  skip: boolean;
+  skip_reason: string;
+  reasoning: string;
+  system_prompt: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+  tool_calls: AISimulationToolCall[];
+}
+
+export interface AISimulationInput {
+  session_id?: string;
+  message: string;
+  reset?: boolean;
+  item_title?: string;
+  item_price?: number;
+  item_description?: string;
+  mock_order_id?: string;
+  mock_order_status?: string;
+}
+
+export interface AISimulationResponse {
+  result: AISimulationResult;
+  history: { role: 'user' | 'assistant'; content: string }[];
 }
 
 export interface AccountTaskSettings {

@@ -34,4 +34,20 @@ describe('product scoped AI assistants', () => {
     expect(page).toContain('role="switch"');
     expect(page).toContain('aria-checked={profile.enabled}');
   });
+
+  test('supports tool mode settings and admin simulation chat', () => {
+    const page = source('components/AIAssistants.tsx');
+    const api = source('services/api.ts');
+    expect(page).toContain('reply_mode');
+    expect(page).toContain('max_tool_rounds');
+    expect(page).toContain('agent_prompt');
+    expect(page).toContain('notify_human_enabled');
+    expect(page).toContain('工具模式');
+    expect(page).toContain('模拟对话');
+    expect(page).toContain('simulateAIProfile');
+    expect(page).toContain('mock_order_id');
+    expect(page).toContain('skip_reason');
+    expect(page).toContain('system_prompt');
+    expect(api).toContain('/ai-profiles/${id}/simulate');
+  });
 });

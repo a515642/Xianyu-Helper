@@ -8,10 +8,10 @@ import (
 
 // AIConversationMessage 是一个账号会话中的 AI 对话消息。
 type AIConversationMessage struct {
-	Role         string
-	Content      string
-	Intent       string
-	BargainCount int
+	Role         string `json:"role"`
+	Content      string `json:"content"`
+	Intent       string `json:"intent"`
+	BargainCount int    `json:"bargain_count"`
 }
 
 // AIReplySettings 对应 ai_reply_settings 表。

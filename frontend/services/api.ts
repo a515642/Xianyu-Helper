@@ -4,6 +4,7 @@ import {
   AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, CardSalePage, CardSaleStatus, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, ItemGreetingRule, ItemGreetingRuleInput, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
+  AISimulationInput, AISimulationResponse,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
@@ -60,6 +61,7 @@ export const createAIProfile = async (input: AIProfileInput): Promise<AIProfile>
 export const updateAIProfile = async (id: number, input: Partial<AIProfileInput>): Promise<AIProfile> => put(`/ai-profiles/${id}`, input);
 export const deleteAIProfile = async (id: number): Promise<ApiResponse> => del(`/ai-profiles/${id}`);
 export const replaceAIProfileItems = async (id: number, itemIds: string[]): Promise<ApiResponse> => put(`/ai-profiles/${id}/items`, { item_ids: itemIds });
+export const simulateAIProfile = async (id: number, input: AISimulationInput): Promise<AISimulationResponse> => post(`/ai-profiles/${id}/simulate`, input);
 export const getAIForbiddenWords = async (): Promise<AIForbiddenWord[]> => get('/ai-forbidden-words');
 export const replaceAIForbiddenWords = async (rules: AIForbiddenWord[]): Promise<ApiResponse> => put('/ai-forbidden-words', { rules });
 

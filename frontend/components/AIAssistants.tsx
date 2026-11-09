@@ -1,13 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, Loader2, Plus, Save, ShieldAlert, Trash2, X } from 'lucide-react';
-import { AccountDetail, AIForbiddenWord, AIProfile, AIProfileInput, Item } from '../types';
-import { createAIProfile, deleteAIProfile, fetchAIModels, getAIForbiddenWords, getAIProfiles, getAccountDetails, getItems, replaceAIForbiddenWords, updateAIProfile } from '../services/api';
+import { Bot, Loader2, MessageSquare, Plus, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
+import { AccountDetail, AIForbiddenWord, AIProfile, AIProfileInput, AISimulationResult, Item } from '../types';
+import { createAIProfile, deleteAIProfile, fetchAIModels, getAIForbiddenWords, getAIProfiles, getAccountDetails, getItems, replaceAIForbiddenWords, simulateAIProfile, updateAIProfile } from '../services/api';
 
 const blankProfile = (cookieID: string): AIProfileInput => ({
   cookie_id: cookieID, name: '', enabled: true, use_system_api: true, base_url: '', model_name: '',
-  custom_prompts: '', thinking_mode: 'disabled', bargain_strategy_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3, item_ids: [],
+  custom_prompts: '', thinking_mode: 'disabled', bargain_strategy_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3,
+  reply_mode: 'tools', max_tool_rounds: 8, agent_prompt: '', notify_human_enabled: true, item_ids: [],
 });
+
+const defaultSimulationContext = {
+  item_title: '模拟商品', item_price: 100, item_description: '', mock_order_id: '', mock_order_status: 'processing',
+};
+
+type SimulationEntry = { id: string; role: 'user' | 'assistant'; content: string; meta?: AISimulationResult };
 
 const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
@@ -26,6 +33,14 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
   const [modelError, setModelError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // 后台模拟对话：以管理员扮演买家，仅走真实提示词与模型，不触达平台。
+  const [simProfile, setSimProfile] = useState<AIProfile | null>(null);
+  const [simSession, setSimSession] = useState('');
+  const [simEntries, setSimEntries] = useState<SimulationEntry[]>([]);
+  const [simInput, setSimInput] = useState('');
+  const [simContext, setSimContext] = useState(defaultSimulationContext);
+  const [simSending, setSimSending] = useState(false);
+  const [simError, setSimError] = useState('');
 
   const load = async (id = accountID) => {
     if (!id) return;
@@ -57,7 +72,15 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
 
   const openCreate = () => { setEditing(blankProfile(accountID)); setEditingID(null); setApiKey(''); setModels([]); setModelError(''); setItemSearch(''); };
   const openEdit = (profile: AIProfile) => {
-    setEditing({ cookie_id: profile.cookie_id, name: profile.name, enabled: profile.enabled, use_system_api: profile.use_system_api, base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts, thinking_mode: profile.thinking_mode || 'disabled', bargain_strategy_enabled: profile.bargain_strategy_enabled === true, max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds, item_ids: [...(profile.item_ids || [])] });
+    setEditing({
+      cookie_id: profile.cookie_id, name: profile.name, enabled: profile.enabled, use_system_api: profile.use_system_api,
+      base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts,
+      thinking_mode: profile.thinking_mode || 'disabled', bargain_strategy_enabled: profile.bargain_strategy_enabled === true,
+      max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds,
+      reply_mode: profile.reply_mode || 'text', max_tool_rounds: profile.max_tool_rounds || 8,
+      agent_prompt: profile.agent_prompt || '', notify_human_enabled: profile.notify_human_enabled !== false,
+      item_ids: [...(profile.item_ids || [])],
+    });
     setEditingID(profile.id); setApiKey(''); setModels([]); setModelError(''); setItemSearch('');
   };
   const loadModels = async () => {
@@ -92,6 +115,48 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
     setSaving(true); try { await replaceAIForbiddenWords(forbidden); setForbiddenOpen(false); } catch (err) { setError(err instanceof Error ? err.message : '违禁词保存失败'); } finally { setSaving(false); }
   };
 
+  const openSimulation = (profile: AIProfile) => {
+    const firstItem = items.find(item => (profile.item_ids || []).includes(item.item_id));
+    setSimProfile(profile); setSimSession(''); setSimEntries([]); setSimInput(''); setSimError('');
+    setSimContext({
+      item_title: firstItem?.item_title || defaultSimulationContext.item_title,
+      item_price: Number(firstItem?.item_price) > 0 ? Number(firstItem?.item_price) : defaultSimulationContext.item_price,
+      item_description: firstItem?.item_description || '',
+      mock_order_id: '', mock_order_status: 'processing',
+    });
+  };
+  const resetSimulation = () => { setSimSession(''); setSimEntries([]); setSimInput(''); setSimError(''); };
+  const sendSimulation = async () => {
+    const text = simInput.trim();
+    if (!simProfile || !text || simSending) return;
+    const userEntry: SimulationEntry = { id: `user-${Date.now()}`, role: 'user', content: text };
+    setSimSending(true); setSimError(''); setSimInput('');
+    setSimEntries(current => [...current, userEntry]);
+    try {
+      const orderID = simContext.mock_order_id.trim();
+      const response = await simulateAIProfile(simProfile.id, {
+        session_id: simSession || undefined,
+        message: text,
+        item_title: simContext.item_title.trim() || undefined,
+        item_price: simContext.item_price,
+        item_description: simContext.item_description.trim() || undefined,
+        mock_order_id: orderID || undefined,
+        mock_order_status: orderID ? simContext.mock_order_status : undefined,
+      });
+      const result = response.result;
+      const content = result.segments.length > 0
+        ? result.segments.join('\n\n')
+        : (result.skip ? `（未回复）${result.skip_reason ? `：${result.skip_reason}` : ''}` : (result.reply_text || '[未回复]'));
+      setSimSession(result.session_id);
+      const meta: AISimulationResult = { ...result, segments: result.segments || [], tool_calls: result.tool_calls || [] };
+      setSimEntries(current => [...current, { id: `assistant-${Date.now()}`, role: 'assistant', content, meta }]);
+    } catch (err) {
+      setSimError(err instanceof Error ? err.message : '模拟请求失败');
+      setSimEntries(current => current.filter(entry => entry.id !== userEntry.id));
+      setSimInput(text);
+    } finally { setSimSending(false); }
+  };
+
   return <div className="space-y-8 animate-fade-in">
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
       <div><h2 className="text-4xl font-extrabold text-gray-900 tracking-tight">AI 助手</h2><p className="mt-2 font-medium text-gray-500">按闲鱼账号管理多个 AI，并将每个 AI 应用到多个商品。</p></div>
@@ -105,24 +170,148 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
     </div>
     {error && <div className="rounded-2xl bg-red-50 px-5 py-4 font-bold text-red-700">{error}</div>}
     {loading ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-sky-500" /></div> : profiles.length === 0 ? <div className="ios-card rounded-2xl p-10 text-center text-gray-500">当前账号还没有 AI 助手，请先创建。</div> : <div className="grid gap-5 lg:grid-cols-2">{profiles.map(profile => <div key={profile.id} className="ios-card rounded-2xl p-6">
-      <div className="flex items-start justify-between gap-4"><div><h3 className="flex items-center gap-2 text-xl font-extrabold text-gray-900"><Bot className="h-5 w-5 text-purple-500" />{profile.name}</h3><p className="mt-2 text-sm text-gray-500">{profile.use_system_api ? '继承系统 API 配置' : '使用自定义 API 配置'} · {profile.model_name || '系统默认模型'}</p></div><span className={`rounded-lg px-2.5 py-1 text-xs font-bold ${profile.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{profile.enabled ? '已启用' : '已停用'}</span></div>
-      <div className="mt-5 flex flex-wrap gap-2">{(profile.item_ids || []).map(id => <span key={id} className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700">{itemLabel(id)}</span>)}{(profile.item_ids || []).length === 0 && <span className="text-sm text-gray-400">未绑定商品</span>}</div>
-      <div className="mt-5 flex items-center justify-end gap-3"><button type="button" role="switch" aria-checked={profile.enabled} aria-label={`${profile.name}启用状态`} onClick={async () => { try { await updateAIProfile(profile.id, { cookie_id: profile.cookie_id, name: profile.name, enabled: !profile.enabled, use_system_api: profile.use_system_api, base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts, thinking_mode: profile.thinking_mode, bargain_strategy_enabled: profile.bargain_strategy_enabled === true, max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount, max_bargain_rounds: profile.max_bargain_rounds, item_ids: profile.item_ids }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '更新 AI 开关失败'); } }} className={`relative h-7 w-12 rounded-full transition-colors ${profile.enabled ? 'bg-brand' : 'bg-gray-300'}`}><span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${profile.enabled ? 'translate-x-5' : 'translate-x-0'}`} /></button><button type="button" onClick={() => openEdit(profile)} className="rounded-xl bg-gray-100 px-4 py-2 font-bold text-gray-700 hover:bg-gray-200">编辑</button><button type="button" onClick={() => void removeProfile(profile.id)} className="rounded-xl bg-red-50 px-4 py-2 font-bold text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /></button></div>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="flex items-center gap-2 text-xl font-extrabold text-gray-900"><Bot className="h-5 w-5 text-purple-500" />{profile.name}</h3>
+          <p className="mt-2 text-sm text-gray-500">{profile.use_system_api ? '继承系统 API 配置' : '使用自定义 API 配置'} · {profile.model_name || '系统默认模型'}</p>
+        </div>
+        <span className={`rounded-lg px-2.5 py-1 text-xs font-bold ${profile.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{profile.enabled ? '已启用' : '已停用'}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <span className={`rounded-lg px-2.5 py-1 text-xs font-bold ${profile.reply_mode === 'tools' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600'}`}>{profile.reply_mode === 'tools' ? `工具模式 · ${profile.max_tool_rounds} 轮` : '文本模式'}</span>
+        {profile.reply_mode === 'tools' && profile.notify_human_enabled && <span className="rounded-lg bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">可转人工</span>}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2">{(profile.item_ids || []).map(id => <span key={id} className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700">{itemLabel(id)}</span>)}{(profile.item_ids || []).length === 0 && <span className="text-sm text-gray-400">未绑定商品</span>}</div>
+      <div className="mt-5 flex items-center justify-end gap-3">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={profile.enabled}
+          aria-label={`${profile.name}启用状态`}
+          onClick={async () => {
+            try {
+              await updateAIProfile(profile.id, {
+                cookie_id: profile.cookie_id, name: profile.name, enabled: !profile.enabled, use_system_api: profile.use_system_api,
+                base_url: profile.base_url, model_name: profile.model_name, custom_prompts: profile.custom_prompts,
+                thinking_mode: profile.thinking_mode, bargain_strategy_enabled: profile.bargain_strategy_enabled === true,
+                max_discount_percent: profile.max_discount_percent, max_discount_amount: profile.max_discount_amount,
+                max_bargain_rounds: profile.max_bargain_rounds, reply_mode: profile.reply_mode, max_tool_rounds: profile.max_tool_rounds,
+                agent_prompt: profile.agent_prompt, notify_human_enabled: profile.notify_human_enabled, item_ids: profile.item_ids,
+              });
+              await load();
+            } catch (err) { setError(err instanceof Error ? err.message : '更新 AI 开关失败'); }
+          }}
+          className={`relative h-7 w-12 rounded-full transition-colors ${profile.enabled ? 'bg-brand' : 'bg-gray-300'}`}
+        ><span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${profile.enabled ? 'translate-x-5' : 'translate-x-0'}`} /></button>
+        <button type="button" onClick={() => openSimulation(profile)} className="flex items-center gap-2 rounded-xl bg-purple-50 px-4 py-2 font-bold text-purple-700 hover:bg-purple-100"><MessageSquare className="h-4 w-4" />模拟</button>
+        <button type="button" onClick={() => openEdit(profile)} className="rounded-xl bg-gray-100 px-4 py-2 font-bold text-gray-700 hover:bg-gray-200">编辑</button>
+        <button type="button" onClick={() => void removeProfile(profile.id)} className="rounded-xl bg-red-50 px-4 py-2 font-bold text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /></button>
+      </div>
     </div>)}</div>}
 
-    {editing && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '700px' }}><div className="modal-header flex items-center justify-between gap-4"><div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">{editingID ? '编辑 AI 助手' : '创建 AI 助手'}</h3><p className="mt-1 text-sm text-gray-500">AI 回复只会作用于已绑定商品的买家会话。</p></div><button type="button" aria-label="关闭 AI 助手弹窗" onClick={() => setEditing(null)} disabled={saving} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button></div><div className="modal-body space-y-5">
-      <input value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} placeholder="AI 名称" className="ios-input w-full rounded-xl px-4 py-3" />
-      <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })} />启用 AI 自动回复</label>
-      <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.use_system_api} onChange={e => setEditing({ ...editing, use_system_api: e.target.checked })} />使用系统 API 配置</label>
-      {!editing.use_system_api && <>
-        <div className="space-y-3"><div className="grid gap-3 md:grid-cols-2"><input type="password" value={apiKey} onChange={e => { setApiKey(e.target.value); setModels([]); }} placeholder="API Key（留空保持）" className="ios-input rounded-xl px-3 py-3" /><input value={editing.base_url} onChange={e => { setEditing({ ...editing, base_url: e.target.value }); setModels([]); }} placeholder="Base URL" className="ios-input rounded-xl px-3 py-3" /></div><div className="flex gap-2"><input value={editing.model_name} onChange={e => setEditing({ ...editing, model_name: e.target.value })} placeholder="模型名称（可手动输入）" className="ios-input min-w-0 flex-1 rounded-xl px-3 py-3" /><button type="button" onClick={() => void loadModels()} disabled={modelsLoading} className="rounded-xl bg-gray-100 px-4 py-3 font-bold">{modelsLoading ? '读取中...' : '读取模型'}</button></div>{models.length > 0 && <select value={editing.model_name} onChange={e => setEditing({ ...editing, model_name: e.target.value })} className="ios-input w-full rounded-xl px-3 py-3"><option value="">选择模型</option>{models.map(model => <option key={model} value={model}>{model}</option>)}</select>}{modelError && <p className="text-xs font-bold text-red-600">{modelError}</p>}</div>
-        <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.thinking_mode === 'enabled'} onChange={e => setEditing({ ...editing, thinking_mode: e.target.checked ? 'enabled' : 'disabled' })} />启用思考模式 <span className="text-xs font-normal text-gray-500">可能增加响应时间和 Token 消耗</span></label>
-      </>}
-      <div><textarea value={editing.custom_prompts} onChange={e => setEditing({ ...editing, custom_prompts: e.target.value })} placeholder="自定义提示词，例如：你是{{item_title}}的客服，商品详情：{{item_description}}" className="ios-input h-32 w-full resize-none rounded-xl px-4 py-3" /><p className="mt-1 text-xs text-gray-500">可用变量：{'{{item_title}}'} 商品名称、{'{{item_price}}'} 商品价格、{'{{item_description}}'} 商品详情。</p></div>
-      <label className="flex items-center gap-3 rounded-xl bg-amber-50 p-4 font-bold text-amber-900"><input type="checkbox" checked={editing.bargain_strategy_enabled} onChange={e => setEditing({ ...editing, bargain_strategy_enabled: e.target.checked })} />启用砍价策略 <span className="text-xs font-normal text-amber-700">关闭时遇到砍价消息时没有调整价格的能力</span></label>
-      <div className="border-t border-gray-200 pt-5"><h4 className="mb-3 text-lg font-bold text-gray-900">砍价策略参数</h4><div className="grid gap-3 md:grid-cols-3"><label className="text-sm font-bold text-gray-700">最大折扣比例 (%)<input type="number" min="0" max="100" value={editing.max_discount_percent} onChange={e => setEditing({ ...editing, max_discount_percent: Number(e.target.value) || 0 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label><label className="text-sm font-bold text-gray-700">最大折扣金额 (元)<input type="number" min="0" value={editing.max_discount_amount} onChange={e => setEditing({ ...editing, max_discount_amount: Number(e.target.value) || 0 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label><label className="text-sm font-bold text-gray-700">最大砍价轮次<input type="number" min="1" max="10" value={editing.max_bargain_rounds} onChange={e => setEditing({ ...editing, max_bargain_rounds: Number(e.target.value) || 1 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label></div></div>
-      <div><div className="mb-2 flex items-center justify-between gap-3"><span className="font-bold text-gray-700">绑定商品（可多选；一个商品只能绑定一个 AI）</span><span className="text-xs text-gray-500">已选 {editing.item_ids.length} 个</span></div><input value={itemSearch} onChange={e => setItemSearch(e.target.value)} placeholder="搜索商品名称或 ID" className="ios-input mb-2 w-full rounded-xl px-3 py-2" /><div className="mb-2 flex gap-2"><button type="button" onClick={() => setEditing({ ...editing, item_ids: Array.from(new Set([...editing.item_ids, ...visibleItems.map(item => item.item_id)])) })} className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold">全选当前结果</button><button type="button" onClick={() => setEditing({ ...editing, item_ids: editing.item_ids.filter(id => !visibleItems.some(item => item.item_id === id)) })} className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold">取消当前结果</button></div><div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border border-gray-200 p-3">{visibleItems.map(item => { const selected = editing.item_ids.includes(item.item_id); const owner = assignedElsewhere.get(item.item_id); return <label key={item.item_id} className="flex items-center gap-3 rounded-lg p-2 hover:bg-gray-50"><input type="checkbox" checked={selected} onChange={e => setEditing({ ...editing, item_ids: e.target.checked ? [...editing.item_ids, item.item_id] : editing.item_ids.filter(id => id !== item.item_id) })} /><span className="truncate text-sm font-medium">{item.item_title || item.item_id}</span>{owner && !selected && <span className="ml-auto text-xs text-amber-600">已绑定：{owner}</span>}</label>})}{visibleItems.length === 0 && <p className="py-4 text-center text-sm text-gray-400">没有匹配商品</p>}</div></div>
-    </div><div className="modal-footer"><div className="flex w-full justify-end gap-3"><button type="button" onClick={() => setEditing(null)} disabled={saving} className="rounded-xl bg-gray-100 px-5 py-3 font-bold">取消</button><button type="button" onClick={() => void saveProfile()} disabled={saving} className="ios-btn-primary flex items-center gap-2 rounded-xl px-5 py-3 font-bold">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}保存</button></div></div></div></div>, document.body)}
+    {editing && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '700px' }}>
+      <div className="modal-header flex items-center justify-between gap-4">
+        <div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">{editingID ? '编辑 AI 助手' : '创建 AI 助手'}</h3><p className="mt-1 text-sm text-gray-500">AI 回复只会作用于已绑定商品的买家会话。</p></div>
+        <button type="button" aria-label="关闭 AI 助手弹窗" onClick={() => setEditing(null)} disabled={saving} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button>
+      </div>
+      <div className="modal-body space-y-5">
+        <input value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} placeholder="AI 名称" className="ios-input w-full rounded-xl px-4 py-3" />
+        <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })} />启用 AI 自动回复</label>
+        <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.use_system_api} onChange={e => setEditing({ ...editing, use_system_api: e.target.checked })} />使用系统 API 配置</label>
+        {!editing.use_system_api && <>
+          <div className="space-y-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <input type="password" value={apiKey} onChange={e => { setApiKey(e.target.value); setModels([]); }} placeholder="API Key（留空保持）" className="ios-input rounded-xl px-3 py-3" />
+              <input value={editing.base_url} onChange={e => { setEditing({ ...editing, base_url: e.target.value }); setModels([]); }} placeholder="Base URL" className="ios-input rounded-xl px-3 py-3" />
+            </div>
+            <div className="flex gap-2"><input value={editing.model_name} onChange={e => setEditing({ ...editing, model_name: e.target.value })} placeholder="模型名称（可手动输入）" className="ios-input min-w-0 flex-1 rounded-xl px-3 py-3" /><button type="button" onClick={() => void loadModels()} disabled={modelsLoading} className="rounded-xl bg-gray-100 px-4 py-3 font-bold">{modelsLoading ? '读取中...' : '读取模型'}</button></div>
+            {models.length > 0 && <select value={editing.model_name} onChange={e => setEditing({ ...editing, model_name: e.target.value })} className="ios-input w-full rounded-xl px-3 py-3"><option value="">选择模型</option>{models.map(model => <option key={model} value={model}>{model}</option>)}</select>}
+            {modelError && <p className="text-xs font-bold text-red-600">{modelError}</p>}
+          </div>
+          <label className="flex items-center gap-3 font-bold"><input type="checkbox" checked={editing.thinking_mode === 'enabled'} onChange={e => setEditing({ ...editing, thinking_mode: e.target.checked ? 'enabled' : 'disabled' })} />启用思考模式 <span className="text-xs font-normal text-gray-500">可能增加响应时间和 Token 消耗</span></label>
+        </>}
+        <div><textarea value={editing.custom_prompts} onChange={e => setEditing({ ...editing, custom_prompts: e.target.value })} placeholder="自定义提示词，例如：你是{{item_title}}的客服，商品详情：{{item_description}}" className="ios-input h-32 w-full resize-none rounded-xl px-4 py-3" /><p className="mt-1 text-xs text-gray-500">可用变量：{'{{item_title}}'} 商品名称、{'{{item_price}}'} 商品价格、{'{{item_description}}'} 商品详情。</p></div>
+
+        <div className="space-y-4 border-t border-gray-200 pt-5">
+          <h4 className="text-lg font-bold text-gray-900">回复方式</h4>
+          <label className="block text-sm font-bold text-gray-700">回复模式
+            <select value={editing.reply_mode} onChange={e => setEditing({ ...editing, reply_mode: e.target.value === 'tools' ? 'tools' : 'text' })} className="ios-input mt-2 w-full rounded-xl px-3 py-3">
+              <option value="tools">工具模式：AI 决定回复、分段发送或转人工</option>
+              <option value="text">文本模式：兼容旧行为，仅返回一段文本</option>
+            </select>
+          </label>
+          {editing.reply_mode === 'tools' && <>
+            <label className="flex items-center gap-3 rounded-xl bg-amber-50 p-4 font-bold text-amber-900"><input type="checkbox" checked={editing.notify_human_enabled} onChange={e => setEditing({ ...editing, notify_human_enabled: e.target.checked })} />启用转人工通知 <span className="text-xs font-normal text-amber-700">AI 可通知卖家介入，同一会话 30 分钟内最多通知一次</span></label>
+            <label className="block text-sm font-bold text-gray-700">工具轮数上限
+              <input type="number" min="1" max="12" value={editing.max_tool_rounds} onChange={e => setEditing({ ...editing, max_tool_rounds: Math.min(12, Math.max(1, Number(e.target.value) || 1)) })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" />
+              <span className="mt-1 block text-xs font-normal text-gray-500">1–12 轮，默认 8。轮数越多越能分多条回复，但耗时和 Token 也越高。</span>
+            </label>
+            <div>
+              <textarea value={editing.agent_prompt} onChange={e => setEditing({ ...editing, agent_prompt: e.target.value })} placeholder="工具模式专用提示词，留空使用系统默认提示词" className="ios-input h-40 w-full resize-none rounded-xl px-4 py-3" />
+              <p className="mt-1 text-xs text-gray-500">可用变量：{'{{item_title}}'}、{'{{item_price}}'}、{'{{item_description}}'}。商品、价格安全规则和工具调用约定会自动追加。</p>
+            </div>
+          </>}
+        </div>
+
+        <label className="flex items-center gap-3 rounded-xl bg-amber-50 p-4 font-bold text-amber-900"><input type="checkbox" checked={editing.bargain_strategy_enabled} onChange={e => setEditing({ ...editing, bargain_strategy_enabled: e.target.checked })} />启用砍价策略 <span className="text-xs font-normal text-amber-700">关闭时遇到砍价消息时没有调整价格的能力</span></label>
+        <div className="border-t border-gray-200 pt-5"><h4 className="mb-3 text-lg font-bold text-gray-900">砍价策略参数</h4><div className="grid gap-3 md:grid-cols-3">
+          <label className="text-sm font-bold text-gray-700">最大折扣比例 (%)<input type="number" min="0" max="100" value={editing.max_discount_percent} onChange={e => setEditing({ ...editing, max_discount_percent: Number(e.target.value) || 0 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label>
+          <label className="text-sm font-bold text-gray-700">最大折扣金额 (元)<input type="number" min="0" value={editing.max_discount_amount} onChange={e => setEditing({ ...editing, max_discount_amount: Number(e.target.value) || 0 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label>
+          <label className="text-sm font-bold text-gray-700">最大砍价轮次<input type="number" min="1" max="10" value={editing.max_bargain_rounds} onChange={e => setEditing({ ...editing, max_bargain_rounds: Number(e.target.value) || 1 })} className="ios-input mt-2 w-full rounded-xl px-3 py-3" /></label>
+        </div></div>
+        <div><div className="mb-2 flex items-center justify-between gap-3"><span className="font-bold text-gray-700">绑定商品（可多选；一个商品只能绑定一个 AI）</span><span className="text-xs text-gray-500">已选 {editing.item_ids.length} 个</span></div><input value={itemSearch} onChange={e => setItemSearch(e.target.value)} placeholder="搜索商品名称或 ID" className="ios-input mb-2 w-full rounded-xl px-3 py-2" /><div className="mb-2 flex gap-2"><button type="button" onClick={() => setEditing({ ...editing, item_ids: Array.from(new Set([...editing.item_ids, ...visibleItems.map(item => item.item_id)])) })} className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold">全选当前结果</button><button type="button" onClick={() => setEditing({ ...editing, item_ids: editing.item_ids.filter(id => !visibleItems.some(item => item.item_id === id)) })} className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold">取消当前结果</button></div><div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border border-gray-200 p-3">{visibleItems.map(item => { const selected = editing.item_ids.includes(item.item_id); const owner = assignedElsewhere.get(item.item_id); return <label key={item.item_id} className="flex items-center gap-3 rounded-lg p-2 hover:bg-gray-50"><input type="checkbox" checked={selected} onChange={e => setEditing({ ...editing, item_ids: e.target.checked ? [...editing.item_ids, item.item_id] : editing.item_ids.filter(id => id !== item.item_id) })} /><span className="truncate text-sm font-medium">{item.item_title || item.item_id}</span>{owner && !selected && <span className="ml-auto text-xs text-amber-600">已绑定：{owner}</span>}</label>})}{visibleItems.length === 0 && <p className="py-4 text-center text-sm text-gray-400">没有匹配商品</p>}</div></div>
+      </div>
+      <div className="modal-footer"><div className="flex w-full justify-end gap-3"><button type="button" onClick={() => setEditing(null)} disabled={saving} className="rounded-xl bg-gray-100 px-5 py-3 font-bold">取消</button><button type="button" onClick={() => void saveProfile()} disabled={saving} className="ios-btn-primary flex items-center gap-2 rounded-xl px-5 py-3 font-bold">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}保存</button></div></div>
+    </div></div>, document.body)}
+
+    {simProfile && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '860px' }}>
+      <div className="modal-header flex items-center justify-between gap-4">
+        <div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">模拟对话 · {simProfile.name}</h3><p className="mt-1 text-sm text-gray-500">以买家身份与助手对话。只复用提示词与模型配置，不会发送真实消息、改价或通知。</p></div>
+        <button type="button" aria-label="关闭模拟对话" onClick={() => setSimProfile(null)} disabled={simSending} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button>
+      </div>
+      <div className="modal-body space-y-4">
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="text-sm font-bold text-gray-700">模拟商品名称<input value={simContext.item_title} onChange={e => setSimContext({ ...simContext, item_title: e.target.value })} className="ios-input mt-1 w-full rounded-xl px-3 py-2" /></label>
+          <label className="text-sm font-bold text-gray-700">商品价格 (元)<input type="number" min="0" step="0.01" value={simContext.item_price} onChange={e => setSimContext({ ...simContext, item_price: Number(e.target.value) || 0 })} className="ios-input mt-1 w-full rounded-xl px-3 py-2" /></label>
+          <label className="text-sm font-bold text-gray-700">模拟订单号（可选）<input value={simContext.mock_order_id} onChange={e => setSimContext({ ...simContext, mock_order_id: e.target.value })} placeholder="填写后可测试改价" className="ios-input mt-1 w-full rounded-xl px-3 py-2" /></label>
+          <label className="text-sm font-bold text-gray-700 md:col-span-2">商品描述<input value={simContext.item_description} onChange={e => setSimContext({ ...simContext, item_description: e.target.value })} className="ios-input mt-1 w-full rounded-xl px-3 py-2" /></label>
+          <label className="text-sm font-bold text-gray-700">模拟订单状态<select value={simContext.mock_order_status} onChange={e => setSimContext({ ...simContext, mock_order_status: e.target.value })} disabled={!simContext.mock_order_id.trim()} className="ios-input mt-1 w-full rounded-xl px-3 py-2"><option value="processing">待发货（可改价）</option><option value="pending_ship">待收货</option><option value="completed">已完成</option></select></label>
+        </div>
+        <p className="text-xs text-gray-500">以上参数会用于下一次发送；模拟会话只保存在服务端内存，重启后清空。</p>
+
+        <div className="h-80 space-y-3 overflow-y-auto rounded-2xl bg-gray-50 p-4">
+          {simEntries.length === 0 && <p className="py-16 text-center text-sm text-gray-400">输入买家消息后发送，模拟结果会显示助手回复、分段、工具调用与提示词。</p>}
+          {simEntries.map(entry => <div key={entry.id} className={`flex ${entry.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${entry.role === 'user' ? 'bg-brand text-white' : 'bg-white text-gray-800 shadow-sm'}`}>
+              <p className="whitespace-pre-wrap text-sm font-medium">{entry.content}</p>
+              {entry.meta && <div className="mt-2 space-y-1 border-t border-gray-200 pt-2 text-xs text-gray-500">
+                <div className="flex flex-wrap gap-x-3 gap-y-1">
+                  <span>{entry.meta.segments.length > 1 ? `分段 ${entry.meta.segments.length} 条` : '单条回复'}</span>
+                  <span>Tokens {entry.meta.total_tokens}</span>
+                  <span>{entry.meta.duration_ms} ms</span>
+                  {entry.meta.skip && <span className="font-bold text-amber-600">已跳过{entry.meta.skip_reason ? `：${entry.meta.skip_reason}` : ''}</span>}
+                </div>
+                {entry.meta.segments.length > 1 && <ol className="list-decimal space-y-1 pl-4">{entry.meta.segments.map((segment, index) => <li key={index}>{segment}</li>)}</ol>}
+                {entry.meta.tool_calls.length > 0 && <details><summary className="cursor-pointer font-bold">工具调用 {entry.meta.tool_calls.length} 次</summary>{entry.meta.tool_calls.map((call, index) => <div key={index} className="mt-1 rounded-lg bg-gray-50 p-2"><div className="font-bold">第 {call.round} 轮 · {call.tool_name} · {call.duration_ms} ms · {call.success ? '成功' : '失败'}</div><pre className="mt-1 whitespace-pre-wrap break-all">{call.arguments}</pre><pre className="mt-1 whitespace-pre-wrap break-all text-gray-600">{call.result}</pre></div>)}</details>}
+                {entry.meta.reasoning && <details><summary className="cursor-pointer font-bold">思考过程</summary><pre className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-2">{entry.meta.reasoning}</pre></details>}
+                {entry.meta.system_prompt && <details><summary className="cursor-pointer font-bold">系统提示词</summary><pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-2">{entry.meta.system_prompt}</pre></details>}
+              </div>}
+            </div>
+          </div>)}
+          {simSending && <div className="flex justify-start"><div className="flex items-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-bold text-gray-500 shadow-sm"><Loader2 className="h-4 w-4 animate-spin" />助手思考中…</div></div>}
+        </div>
+        {simError && <div className="rounded-xl bg-red-50 px-4 py-3 text-sm font-bold text-red-700">{simError}</div>}
+
+        <div>
+          <textarea value={simInput} onChange={e => setSimInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void sendSimulation(); } }} placeholder="以买家身份输入消息，Enter 发送，Shift+Enter 换行" className="ios-input h-24 w-full resize-none rounded-xl px-4 py-3" />
+          <p className="mt-1 text-xs text-gray-500">当前会话：{simSession || '尚未开始'} · 消息上限 2000 字</p>
+        </div>
+      </div>
+      <div className="modal-footer"><div className="flex w-full justify-end gap-3">
+        <button type="button" onClick={resetSimulation} disabled={simSending || simEntries.length === 0} className="flex items-center gap-2 rounded-xl bg-gray-100 px-5 py-3 font-bold"><RotateCcw className="h-4 w-4" />重置对话</button>
+        <button type="button" onClick={() => void sendSimulation()} disabled={simSending || !simInput.trim()} className="ios-btn-primary flex items-center gap-2 rounded-xl px-5 py-3 font-bold">{simSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}发送</button>
+      </div></div>
+    </div></div>, document.body)}
 
     {forbiddenOpen && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '700px' }}><div className="modal-header flex items-center justify-between gap-4"><div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">全局违禁词</h3><p className="mt-1 text-sm text-gray-500">AI 回复发送前会按列表顺序进行字面替换。</p></div><button type="button" aria-label="关闭违禁词弹窗" onClick={() => setForbiddenOpen(false)} disabled={saving} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button></div><div className="modal-body space-y-3">{forbidden.map((rule, index) => <div key={rule.id || index} className="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-2"><input value={rule.keyword} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,keyword:e.target.value} : r))} placeholder="违禁词" className="ios-input rounded-lg px-3 py-2" /><input value={rule.replacement} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,replacement:e.target.value} : r))} placeholder="替换词" className="ios-input rounded-lg px-3 py-2" /><input type="checkbox" checked={rule.enabled} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,enabled:e.target.checked} : r))} /><button type="button" onClick={() => setForbidden(current => current.filter((_,i) => i!==index))} className="text-red-600"><Trash2 className="h-4 w-4" /></button></div>)}<button type="button" onClick={() => setForbidden(current => [...current,{keyword:'',replacement:'',enabled:true}])} className="rounded-xl bg-gray-100 px-4 py-2 font-bold">+ 添加规则</button></div><div className="modal-footer"><div className="flex w-full justify-end gap-3"><button type="button" onClick={() => setForbiddenOpen(false)} disabled={saving} className="rounded-xl bg-gray-100 px-5 py-3 font-bold">取消</button><button type="button" onClick={() => void saveForbidden()} disabled={saving} className="ios-btn-primary rounded-xl px-5 py-3 font-bold">保存违禁词</button></div></div></div></div>, document.body)}
   </div>;
