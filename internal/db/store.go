@@ -23,6 +23,7 @@ type Store struct {
 	ItemGreetings     *ItemGreetings
 	AIReply           *AIReply
 	AIProfiles        *AIProfiles
+	AILogs            *AITurnLogStore
 	Notifications     *Notifications
 	Settings          *SystemSettings
 	WSMessages        *WSMessageStore
@@ -58,6 +59,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		ItemGreetings:     &ItemGreetings{DB: db, Dialect: dialect},
 		AIReply:           &AIReply{DB: db, codec: codec},
 		AIProfiles:        &AIProfiles{DB: db, Dialect: dialect, codec: codec},
+		AILogs:            &AITurnLogStore{DB: db, Dialect: dialect},
 		Notifications:     &Notifications{DB: db, Dialect: dialect, codec: codec},
 		Settings:          &SystemSettings{DB: db, Dialect: dialect, codec: codec},
 		WSMessages:        &WSMessageStore{DB: db},

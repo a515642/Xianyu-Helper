@@ -762,6 +762,46 @@ func TestMultiDB_Notifications(t *testing.T) {
 	}
 }
 
+// TestMultiDB_AITurnLogs 覆盖 RETURNING/LastInsertId 与明细级联删除在各方言下的行为。
+func TestMultiDB_AITurnLogs(t *testing.T) {
+	for _, tg := range allTestTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			defer tg.cleanup()
+			ctx := context.Background()
+			s := tg.store
+
+			turnID, err := s.AILogs.Insert(ctx, AITurnLog{
+				AIProfileID: 1,
+				CookieID:    tg.name + "_ai_log",
+				ChatID:      "chat1",
+				ItemID:      "item1",
+				Simulated:   true,
+				SessionID:   "sim-1",
+				ReplyMode:   "tools",
+				Outcome:     "sent",
+				ReplyText:   "你好",
+				TotalTokens: 9,
+				DurationMs:  12,
+			}, []AIToolCallLog{{Round: 1, ToolName: "send_reply", Arguments: "{}", Result: "{}", Success: true}})
+			if err != nil || turnID == 0 {
+				t.Fatalf("Insert: id=%d err=%v", turnID, err)
+			}
+			var calls int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM ai_tool_calls WHERE turn_log_id=?`, turnID).Scan(&calls); err != nil || calls != 1 {
+				t.Fatalf("tool calls = %d err=%v", calls, err)
+			}
+			// 未来截止时间应清空本轮及其明细。
+			deleted, err := s.AILogs.DeleteBefore(ctx, time.Now().Add(time.Hour))
+			if err != nil || deleted != 1 {
+				t.Fatalf("DeleteBefore: deleted=%d err=%v", deleted, err)
+			}
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM ai_tool_calls WHERE turn_log_id=?`, turnID).Scan(&calls); err != nil || calls != 0 {
+				t.Fatalf("orphan tool calls = %d err=%v", calls, err)
+			}
+		})
+	}
+}
+
 func TestMultiDB_LatestMigrationsDownUp(t *testing.T) {
 	for _, tg := range allTestTargets(t) {
 		t.Run(tg.name, func(t *testing.T) {
@@ -771,7 +811,7 @@ func TestMultiDB_LatestMigrationsDownUp(t *testing.T) {
 				t.Fatalf("set goose dialect: %v", err)
 			}
 			goose.SetBaseFS(migrationsFS)
-			for i := 0; i < 33; i++ {
+			for i := 0; i < 34; i++ {
 				if err := goose.Down(tg.store.DB, "migrations/"+subdir); err != nil {
 					t.Fatalf("migration down #%d: %v", i+1, err)
 				}

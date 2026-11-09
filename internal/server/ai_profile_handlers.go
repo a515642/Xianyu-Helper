@@ -33,6 +33,10 @@ type aiProfileRequest struct {
 	MaxDiscountPercent     int      `json:"max_discount_percent"`
 	MaxDiscountAmount      int      `json:"max_discount_amount"`
 	MaxBargainRounds       int      `json:"max_bargain_rounds"`
+	ReplyMode              *string  `json:"reply_mode"`
+	MaxToolRounds          *int     `json:"max_tool_rounds"`
+	AgentPrompt            *string  `json:"agent_prompt"`
+	NotifyHumanEnabled     *bool    `json:"notify_human_enabled"`
 	ItemIDs                []string `json:"item_ids"`
 }
 
@@ -142,6 +146,19 @@ func (s *Server) updateAIProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := profileFromRequest(existing.ID, req)
+	// 旧版前端不会提交新增字段；未提交时保留现有配置，避免一次编辑清空工具设置。
+	if req.ReplyMode == nil {
+		profile.ReplyMode = existing.ReplyMode
+	}
+	if req.MaxToolRounds == nil {
+		profile.MaxToolRounds = existing.MaxToolRounds
+	}
+	if req.AgentPrompt == nil {
+		profile.AgentPrompt = existing.AgentPrompt
+	}
+	if req.NotifyHumanEnabled == nil {
+		profile.NotifyHumanEnabled = existing.NotifyHumanEnabled
+	}
 	if err := s.Store.AIProfiles.Update(r.Context(), profile, req.APIKey, req.ClearAPIKey); err != nil {
 		writeErr(w, http.StatusBadRequest, "保存 AI 助手失败: "+err.Error())
 		return
@@ -221,6 +238,18 @@ func validateAIProfileRequest(req aiProfileRequest) error {
 	if len(req.CustomPrompts) > 20000 {
 		return errors.New("提示词不能超过 20000 字节")
 	}
+	if req.ReplyMode != nil {
+		mode := strings.TrimSpace(*req.ReplyMode)
+		if mode != "" && !strings.EqualFold(mode, "text") && !strings.EqualFold(mode, "tools") {
+			return errors.New("回复模式只能是 text 或 tools")
+		}
+	}
+	if req.MaxToolRounds != nil && (*req.MaxToolRounds < 1 || *req.MaxToolRounds > 12) {
+		return errors.New("工具轮数必须在 1 到 12 之间")
+	}
+	if req.AgentPrompt != nil && len(*req.AgentPrompt) > 20000 {
+		return errors.New("工具模式提示词不能超过 20000 字节")
+	}
 	if len(req.BaseURL) > 2048 || len(req.ModelName) > 255 {
 		return errors.New("API 地址或模型名称过长")
 	}
@@ -243,7 +272,23 @@ func validateAIProfileRequest(req aiProfileRequest) error {
 }
 
 func profileFromRequest(id int64, req aiProfileRequest) db.AIProfile {
-	return db.AIProfile{ID: id, CookieID: strings.TrimSpace(req.CookieID), Name: strings.TrimSpace(req.Name), Enabled: req.Enabled, UseSystemAPI: req.UseSystemAPI, BaseURL: strings.TrimSpace(req.BaseURL), ModelName: strings.TrimSpace(req.ModelName), ThinkingMode: req.ThinkingMode, BargainStrategyEnabled: req.BargainStrategyEnabled, CustomPrompts: req.CustomPrompts, TriggerMode: "all_text", MaxDiscountPercent: req.MaxDiscountPercent, MaxDiscountAmount: req.MaxDiscountAmount, MaxBargainRounds: req.MaxBargainRounds}
+	replyMode := "text"
+	if req.ReplyMode != nil {
+		replyMode = db.NormalizeAIReplyMode(*req.ReplyMode)
+	}
+	maxToolRounds := 8
+	if req.MaxToolRounds != nil {
+		maxToolRounds = db.NormalizeAIMaxToolRounds(*req.MaxToolRounds)
+	}
+	agentPrompt := ""
+	if req.AgentPrompt != nil {
+		agentPrompt = *req.AgentPrompt
+	}
+	notifyHuman := true
+	if req.NotifyHumanEnabled != nil {
+		notifyHuman = *req.NotifyHumanEnabled
+	}
+	return db.AIProfile{ID: id, CookieID: strings.TrimSpace(req.CookieID), Name: strings.TrimSpace(req.Name), Enabled: req.Enabled, UseSystemAPI: req.UseSystemAPI, BaseURL: strings.TrimSpace(req.BaseURL), ModelName: strings.TrimSpace(req.ModelName), ThinkingMode: req.ThinkingMode, BargainStrategyEnabled: req.BargainStrategyEnabled, CustomPrompts: req.CustomPrompts, TriggerMode: "all_text", MaxDiscountPercent: req.MaxDiscountPercent, MaxDiscountAmount: req.MaxDiscountAmount, MaxBargainRounds: req.MaxBargainRounds, ReplyMode: replyMode, MaxToolRounds: maxToolRounds, AgentPrompt: agentPrompt, NotifyHumanEnabled: notifyHuman}
 }
 func normalizeIDs(values []string) []string {
 	if values == nil {

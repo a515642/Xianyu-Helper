@@ -104,20 +104,21 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	}
 	a.logger.Debug("AI诊断：AI 请求上下文已准备", "profile", profile.ID, "chat_id", m.ChatID, "item_id", m.ItemID, "history_count", len(history), "bargain_enabled", profile.BargainStrategyEnabled, "model", aiCfg.Model, "endpoint_host", endpointHost(aiCfg.BaseURL))
 	withinBargainLimit := true
+	var systemPrompt string
 	if profile.BargainStrategyEnabled {
-		systemPrompt := buildSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
+		systemPrompt = buildSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
 		systemPrompt += "\n请自行判断买家是否在议价；只有确实需要议价时才考虑后续改价工具。"
-		result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
-		a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
-		return result, replyErr
+	} else {
+		systemPrompt = buildGeneralSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc)
 	}
-	systemPrompt := buildGeneralSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc)
-	result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit)
+	trace := newAITurnTrace(started, a, m, profile, aiCfg, systemPrompt)
+	result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit, trace)
+	a.recordAITurn(trace, result, replyErr)
 	a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
 	return result, replyErr
 }
 
-func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool) (*ReplyResult, error) {
+func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool, trace *aiTurnTrace) (*ReplyResult, error) {
 	// 调 OpenAI 兼容接口。地址为空时不回退 SDK 默认服务商（那会把买家消息发到
 	// 用户没有配置的地址），直接报错要求先配置。
 	if strings.TrimSpace(aiCfg.BaseURL) == "" {
@@ -186,6 +187,7 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 		return nil, nil
 	}
 	message := resp.Choices[0].Message
+	trace.observe(resp, message)
 	a.logger.Info("AI诊断：LLM 首次调用完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(requestStarted).Round(time.Millisecond), "tool_calls", len(message.ToolCalls), "finish_reason", resp.Choices[0].FinishReason, "content_len", len([]rune(message.Content)))
 	if len(message.ToolCalls) > 0 && toolEnabled {
 		for _, call := range message.ToolCalls {
@@ -195,12 +197,16 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 				continue
 			}
 			executor := &priceToolExecutor{replier: a, profile: profile, itemPrice: itemPrice, orderClient: a.orderPriceAdjuster, cookies: m.CookieStr, chatID: m.ChatID, buyerID: m.SenderUserID}
+			toolStarted := time.Now()
 			toolResult, toolErr := executor.execute(aiCtx, call.Function.Arguments)
 			if toolErr != nil {
 				a.logger.Warn("AI诊断：改价工具执行失败", "profile", profile.ID, "chat_id", m.ChatID, "error_type", fmt.Sprintf("%T", toolErr))
 				toolResult = "改价未执行：" + toolErr.Error()
 			} else {
 				a.logger.Info("AI诊断：改价工具执行成功", "profile", profile.ID, "chat_id", m.ChatID, "result_len", len([]rune(toolResult)))
+			}
+			if trace != nil {
+				trace.toolCalls = append(trace.toolCalls, db.AIToolCallLog{Round: 1, ToolName: call.Function.Name, Arguments: call.Function.Arguments, Result: toolResult, Success: toolErr == nil, DurationMs: time.Since(toolStarted).Milliseconds()})
 			}
 			messages = append(messages, message, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleTool, Name: call.Function.Name, ToolCallID: call.ID, Content: toolResult})
 			a.logger.Info("AI诊断：改价工具结果已追加到 LLM 请求", "profile", profile.ID, "chat_id", m.ChatID, "tool", call.Function.Name, "tool_call_id_present", call.ID != "", "tool_result_len", len([]rune(toolResult)), "message_count", len(messages))
@@ -221,6 +227,7 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 			return nil, nil
 		}
 		message = resp.Choices[0].Message
+		trace.observe(resp, message)
 		if len(message.ToolCalls) > 0 {
 			a.logger.Warn("AI诊断：LLM 工具结果请求仍返回工具调用", "profile", profile.ID, "chat_id", m.ChatID, "tool_calls", len(message.ToolCalls))
 		}

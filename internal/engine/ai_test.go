@@ -219,6 +219,43 @@ func TestAIReply_SuccessReturnsContent(t *testing.T) {
 	}
 }
 
+// TestAIReply_WritesTurnLog 文本模式也要留下基线观测：成功、静默跳过、失败三种结果。
+func TestAIReply_WritesTurnLog(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		content     string
+		wantOutcome string
+		wantReply   string
+	}{
+		{name: "sent", content: "你好，在的哦", wantOutcome: "sent", wantReply: "你好，在的哦"},
+		{name: "skipped", content: "无需回复 <exit>", wantOutcome: "skipped"},
+		{name: "error", status: http.StatusInternalServerError, wantOutcome: "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, cleanup := newAIStore(t)
+			defer cleanup()
+			ctx := context.Background()
+			srv := mockOpenAIServer(t, tc.status, tc.content)
+			enableTestAI(t, s, srv.URL, "log-ai")
+			_, _ = NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("最低多少钱", "item1", "chat-log"))
+
+			var outcome, replyMode, replyText, errorType string
+			if err := s.DB.QueryRowContext(ctx, `SELECT outcome,reply_mode,reply_text,error_type FROM ai_turn_logs WHERE chat_id=?`, "chat-log").
+				Scan(&outcome, &replyMode, &replyText, &errorType); err != nil {
+				t.Fatalf("query turn log: %v", err)
+			}
+			if outcome != tc.wantOutcome || replyMode != "text" || replyText != tc.wantReply {
+				t.Fatalf("outcome=%q replyMode=%q replyText=%q", outcome, replyMode, replyText)
+			}
+			if tc.wantOutcome == "error" && errorType == "" {
+				t.Fatal("error turn should record error_type")
+			}
+		})
+	}
+}
+
 func TestAIReply_ThinkingModeDoesNotForceFunctionToolChoice(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()
@@ -325,11 +362,11 @@ func TestGlobalAIConfig(t *testing.T) {
 		t.Fatalf("默认值异常: %+v", cfg)
 	}
 	// 未配置地址/模型时应由 replyWithPrompt 明确报错，而不是偷偷用默认服务商或模型。
-	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, cfg, "", 0, "", nil, 0, "sys", false); replyErr == nil {
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, cfg, "", 0, "", nil, 0, "sys", false, nil); replyErr == nil {
 		t.Fatal("未配置 AI 地址时应报错")
 	}
 	emptyCfg := &globalAIConfig{APIKey: "sk-x", BaseURL: "http://127.0.0.1:1"}
-	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, emptyCfg, "", 0, "", nil, 0, "sys", false); replyErr == nil {
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, emptyCfg, "", 0, "", nil, 0, "sys", false, nil); replyErr == nil {
 		t.Fatal("未配置模型时应报错")
 	}
 

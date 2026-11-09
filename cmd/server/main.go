@@ -25,6 +25,7 @@ import (
 	"xianyu-go/internal/browser"
 	"xianyu-go/internal/chat"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/engine"
 	"xianyu-go/internal/logging"
 	"xianyu-go/internal/notify"
 	"xianyu-go/internal/renewal"
@@ -268,6 +269,7 @@ func runServer(parent context.Context, opts serverOptions) error {
 	autoCenter.SetOrderDetailFetcher(ap)
 	notifier := notify.New("", store, logger)
 	notifier.Start(ctx)
+	engine.StartAITurnLogRetention(ctx, store, logger)
 	autoCenter.SetNotifier(notifier)
 	ap.SetAutomation(autoCenter)
 	ap.SetNotifier(notifier)
