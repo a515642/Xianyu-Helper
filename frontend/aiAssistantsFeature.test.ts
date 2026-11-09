@@ -48,6 +48,9 @@ describe('product scoped AI assistants', () => {
     expect(page).toContain('mock_order_id');
     expect(page).toContain('skip_reason');
     expect(page).toContain('system_prompt');
+    expect(page).toContain('getAITurnLogs');
+    expect(page).toContain('运行记录');
     expect(api).toContain('/ai-profiles/${id}/simulate');
+    expect(api).toContain('/ai-profiles/${id}/turn-logs');
   });
 });

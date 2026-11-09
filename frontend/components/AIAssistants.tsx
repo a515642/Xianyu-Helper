@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, Loader2, MessageSquare, Plus, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
-import { AccountDetail, AIForbiddenWord, AIProfile, AIProfileInput, AISimulationResult, Item } from '../types';
-import { createAIProfile, deleteAIProfile, fetchAIModels, getAIForbiddenWords, getAIProfiles, getAccountDetails, getItems, replaceAIForbiddenWords, simulateAIProfile, updateAIProfile } from '../services/api';
+import { Bot, ClipboardList, Loader2, MessageSquare, Plus, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
+import { AccountDetail, AIForbiddenWord, AIProfile, AIProfileInput, AISimulationResult, AITurnLogPage, AITurnLogSource, Item } from '../types';
+import { createAIProfile, deleteAIProfile, fetchAIModels, getAIForbiddenWords, getAIProfiles, getAITurnLogs, getAccountDetails, getItems, replaceAIForbiddenWords, simulateAIProfile, updateAIProfile } from '../services/api';
+
+const outcomeLabel = (outcome: string) => ({ sent: '已回复', skipped: '主动跳过', empty: '空回复', error: '失败' }[outcome] || outcome || '未知');
+const outcomeClass = (outcome: string) => outcome === 'sent' ? 'bg-emerald-100 text-emerald-700' : outcome === 'error' ? 'bg-red-100 text-red-700' : outcome === 'skipped' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600';
 
 const blankProfile = (cookieID: string): AIProfileInput => ({
   cookie_id: cookieID, name: '', enabled: true, use_system_api: true, base_url: '', model_name: '',
@@ -41,6 +44,13 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
   const [simContext, setSimContext] = useState(defaultSimulationContext);
   const [simSending, setSimSending] = useState(false);
   const [simError, setSimError] = useState('');
+  // 观测记录：分析提示词效果与灰度对比，默认只看真实会话。
+  const [logProfile, setLogProfile] = useState<AIProfile | null>(null);
+  const [logSource, setLogSource] = useState<AITurnLogSource>('real');
+  const [logPage, setLogPage] = useState(1);
+  const [logData, setLogData] = useState<AITurnLogPage | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logError, setLogError] = useState('');
 
   const load = async (id = accountID) => {
     if (!id) return;
@@ -126,6 +136,26 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
     });
   };
   const resetSimulation = () => { setSimSession(''); setSimEntries([]); setSimInput(''); setSimError(''); };
+  const loadTurnLogs = async (profileID: number, source: AITurnLogSource, page: number) => {
+    setLogLoading(true); setLogError('');
+    try { setLogData(await getAITurnLogs(profileID, { simulated: source, page, page_size: 20 })); }
+    catch (err) { setLogError(err instanceof Error ? err.message : '观测记录加载失败'); }
+    finally { setLogLoading(false); }
+  };
+  const openTurnLogs = (profile: AIProfile) => {
+    setLogProfile(profile); setLogSource('real'); setLogPage(1); setLogData(null); setLogError('');
+    void loadTurnLogs(profile.id, 'real', 1);
+  };
+  const changeLogSource = (source: AITurnLogSource) => {
+    if (!logProfile) return;
+    setLogSource(source); setLogPage(1);
+    void loadTurnLogs(logProfile.id, source, 1);
+  };
+  const changeLogPage = (page: number) => {
+    if (!logProfile || page < 1) return;
+    setLogPage(page);
+    void loadTurnLogs(logProfile.id, logSource, page);
+  };
   const sendSimulation = async () => {
     const text = simInput.trim();
     if (!simProfile || !text || simSending) return;
@@ -204,6 +234,7 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
           className={`relative h-7 w-12 rounded-full transition-colors ${profile.enabled ? 'bg-brand' : 'bg-gray-300'}`}
         ><span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${profile.enabled ? 'translate-x-5' : 'translate-x-0'}`} /></button>
         <button type="button" onClick={() => openSimulation(profile)} className="flex items-center gap-2 rounded-xl bg-purple-50 px-4 py-2 font-bold text-purple-700 hover:bg-purple-100"><MessageSquare className="h-4 w-4" />模拟</button>
+        <button type="button" onClick={() => openTurnLogs(profile)} className="flex items-center gap-2 rounded-xl bg-sky-50 px-4 py-2 font-bold text-sky-700 hover:bg-sky-100"><ClipboardList className="h-4 w-4" />记录</button>
         <button type="button" onClick={() => openEdit(profile)} className="rounded-xl bg-gray-100 px-4 py-2 font-bold text-gray-700 hover:bg-gray-200">编辑</button>
         <button type="button" onClick={() => void removeProfile(profile.id)} className="rounded-xl bg-red-50 px-4 py-2 font-bold text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /></button>
       </div>
@@ -311,6 +342,58 @@ const AIAssistants: React.FC<{ isAdmin: boolean }> = ({ isAdmin }) => {
         <button type="button" onClick={resetSimulation} disabled={simSending || simEntries.length === 0} className="flex items-center gap-2 rounded-xl bg-gray-100 px-5 py-3 font-bold"><RotateCcw className="h-4 w-4" />重置对话</button>
         <button type="button" onClick={() => void sendSimulation()} disabled={simSending || !simInput.trim()} className="ios-btn-primary flex items-center gap-2 rounded-xl px-5 py-3 font-bold">{simSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}发送</button>
       </div></div>
+    </div></div>, document.body)}
+
+    {logProfile && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '900px' }}>
+      <div className="modal-header flex items-center justify-between gap-4">
+        <div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">运行记录 · {logProfile.name}</h3><p className="mt-1 text-sm text-gray-500">每次回复都会留下提示词、思考、工具调用和 Token 用量，保留 30 天。</p></div>
+        <button type="button" aria-label="关闭运行记录" onClick={() => setLogProfile(null)} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button>
+      </div>
+      <div className="modal-body space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
+          {(['real', 'simulated', 'all'] as AITurnLogSource[]).map(source => <button key={source} type="button" onClick={() => changeLogSource(source)} className={`rounded-xl px-4 py-2 text-sm font-bold ${logSource === source ? 'bg-brand text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>{source === 'real' ? '真实会话' : source === 'simulated' ? '模拟会话' : '全部'}</button>)}
+          <span className="ml-auto text-sm text-gray-500">共 {logData?.total ?? 0} 条</span>
+          <button type="button" onClick={() => logProfile && void loadTurnLogs(logProfile.id, logSource, logPage)} disabled={logLoading} className="flex items-center gap-2 rounded-xl bg-gray-100 px-4 py-2 text-sm font-bold hover:bg-gray-200">{logLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}刷新</button>
+        </div>
+        {logError && <div className="rounded-xl bg-red-50 px-4 py-3 text-sm font-bold text-red-700">{logError}</div>}
+        <div className="max-h-[58vh] space-y-3 overflow-y-auto">
+          {logLoading && !logData && <div className="flex justify-center py-16"><Loader2 className="h-7 w-7 animate-spin text-sky-500" /></div>}
+          {!logLoading && logData?.logs.length === 0 && <p className="py-16 text-center text-sm text-gray-400">暂无记录。真实对话或模拟对话产生回复后，这里会显示分析数据。</p>}
+          {(logData?.logs || []).map(log => <details key={log.id} className="rounded-2xl border border-gray-200 bg-white p-4">
+            <summary className="cursor-pointer list-none">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                <span className="text-gray-500">{log.created_at}</span>
+                <span className={`rounded-lg px-2 py-0.5 ${outcomeClass(log.outcome)}`}>{outcomeLabel(log.outcome)}</span>
+                <span className="rounded-lg bg-purple-50 px-2 py-0.5 text-purple-700">{log.reply_mode === 'tools' ? '工具模式' : '文本模式'}</span>
+                {log.simulated && <span className="rounded-lg bg-indigo-50 px-2 py-0.5 text-indigo-700">模拟</span>}
+                <span className="text-gray-500">Tokens {log.total_tokens}</span>
+                <span className="text-gray-500">{log.duration_ms} ms</span>
+                {log.tool_calls.length > 0 && <span className="text-gray-500">工具 {log.tool_calls.length} 次</span>}
+              </div>
+              <p className="mt-2 line-clamp-2 text-sm font-medium text-gray-800">{log.reply_text || (log.outcome === 'skipped' ? '（本轮主动跳过回复）' : log.outcome === 'error' ? `（请求失败：${log.error_type || '未知错误'}）` : '（无回复内容）')}</p>
+            </summary>
+            <div className="mt-3 space-y-2 border-t border-gray-100 pt-3 text-xs text-gray-600">
+              <div className="grid gap-x-6 gap-y-1 md:grid-cols-2">
+                <span>会话：{log.chat_id || '-'}{log.simulated && log.session_id ? `（${log.session_id}）` : ''}</span>
+                <span>商品：{log.item_id || '-'}</span>
+                <span>买家：{log.user_id || '-'}</span>
+                <span>模型：{log.model || '-'} · 思考 {log.thinking_mode === 'enabled' ? '开' : '关'} · 温度 0.7</span>
+                <span>Token：输入 {log.prompt_tokens} / 输出 {log.completion_tokens} / 合计 {log.total_tokens}</span>
+                <span>提示词指纹：{log.prompt_hash.slice(0, 12)}</span>
+              </div>
+              {log.reasoning && <details><summary className="cursor-pointer font-bold">思考过程</summary><pre className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-2">{log.reasoning}</pre></details>}
+              {log.tool_calls.length > 0 && <details><summary className="cursor-pointer font-bold">工具调用 {log.tool_calls.length} 次</summary>{log.tool_calls.map((call, index) => <div key={index} className="mt-1 rounded-lg bg-gray-50 p-2"><div className="font-bold">第 {call.round} 轮 · {call.tool_name} · {call.duration_ms} ms · {call.success ? '成功' : '失败'}</div><pre className="mt-1 whitespace-pre-wrap break-all">{call.arguments}</pre><pre className="mt-1 whitespace-pre-wrap break-all text-gray-600">{call.result}</pre></div>)}</details>}
+              {log.system_prompt && <details><summary className="cursor-pointer font-bold">系统提示词</summary><pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-2">{log.system_prompt}</pre></details>}
+            </div>
+          </details>)}
+        </div>
+        <div className="flex items-center justify-end gap-3 text-sm font-bold">
+          <button type="button" onClick={() => changeLogPage(logPage - 1)} disabled={logLoading || logPage <= 1} className="rounded-xl bg-gray-100 px-4 py-2 disabled:opacity-50">上一页</button>
+          <span className="text-gray-500">第 {logData?.page || logPage} / {Math.max(1, Math.ceil((logData?.total || 0) / (logData?.page_size || 20)))} 页</span>
+          <button type="button" onClick={() => changeLogPage(logPage + 1)} disabled={logLoading || !logData || logPage >= Math.ceil(logData.total / logData.page_size)} className="rounded-xl bg-gray-100 px-4 py-2 disabled:opacity-50">下一页</button>
+        </div>
+      </div>
+      <div className="modal-footer"><div className="flex w-full justify-end gap-3"><button type="button" onClick={() => setLogProfile(null)} className="rounded-xl bg-gray-100 px-5 py-3 font-bold">关闭</button></div></div>
     </div></div>, document.body)}
 
     {forbiddenOpen && createPortal(<div className="modal-overlay-centered"><div className="modal-container" style={{ maxWidth: '700px' }}><div className="modal-header flex items-center justify-between gap-4"><div className="min-w-0"><h3 className="text-2xl font-extrabold text-gray-900">全局违禁词</h3><p className="mt-1 text-sm text-gray-500">AI 回复发送前会按列表顺序进行字面替换。</p></div><button type="button" aria-label="关闭违禁词弹窗" onClick={() => setForbiddenOpen(false)} disabled={saving} className="shrink-0 rounded-xl p-2 text-gray-500 hover:bg-gray-100"><X /></button></div><div className="modal-body space-y-3">{forbidden.map((rule, index) => <div key={rule.id || index} className="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-2"><input value={rule.keyword} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,keyword:e.target.value} : r))} placeholder="违禁词" className="ios-input rounded-lg px-3 py-2" /><input value={rule.replacement} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,replacement:e.target.value} : r))} placeholder="替换词" className="ios-input rounded-lg px-3 py-2" /><input type="checkbox" checked={rule.enabled} onChange={e => setForbidden(current => current.map((r,i) => i===index ? {...r,enabled:e.target.checked} : r))} /><button type="button" onClick={() => setForbidden(current => current.filter((_,i) => i!==index))} className="text-red-600"><Trash2 className="h-4 w-4" /></button></div>)}<button type="button" onClick={() => setForbidden(current => [...current,{keyword:'',replacement:'',enabled:true}])} className="rounded-xl bg-gray-100 px-4 py-2 font-bold">+ 添加规则</button></div><div className="modal-footer"><div className="flex w-full justify-end gap-3"><button type="button" onClick={() => setForbiddenOpen(false)} disabled={saving} className="rounded-xl bg-gray-100 px-5 py-3 font-bold">取消</button><button type="button" onClick={() => void saveForbidden()} disabled={saving} className="ios-btn-primary rounded-xl px-5 py-3 font-bold">保存违禁词</button></div></div></div></div>, document.body)}

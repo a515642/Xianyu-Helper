@@ -8,6 +8,64 @@ import (
 
 // TestAITurnLogStore_InsertAndDeleteBefore 验证观测主表与工具明细原子写入，
 // 以及按保留期删除时明细先于主表清理。
+func TestAITurnLogStore_List(t *testing.T) {
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	firstID, err := s.AILogs.Insert(ctx, AITurnLog{AIProfileID: 7, CookieID: "acc1", ChatID: "chat1", Outcome: "sent", ReplyText: "第一轮", ReplyMode: "tools"}, []AIToolCallLog{
+		{Round: 1, ToolName: "notify_human", Arguments: "{}", Result: "已通知卖家", Success: true},
+		{Round: 2, ToolName: "send_reply", Arguments: `{"messages":["第一轮"]}`, Result: "已记录回复", Success: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AILogs.Insert(ctx, AITurnLog{AIProfileID: 7, CookieID: "acc1", ChatID: "chat2", Outcome: "skipped"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AILogs.Insert(ctx, AITurnLog{AIProfileID: 7, CookieID: "acc1", ChatID: "sim", Simulated: true, SessionID: "s1", Outcome: "sent", ReplyText: "模拟"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AILogs.Insert(ctx, AITurnLog{AIProfileID: 8, CookieID: "acc1", Outcome: "sent", ReplyText: "别的助手"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	realOnly := false
+	page, err := s.AILogs.List(ctx, AITurnLogFilter{CookieID: "acc1", ProfileID: 7, Simulated: &realOnly, Page: 1, PageSize: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if page.Total != 2 || len(page.Logs) != 1 || page.Logs[0].ChatID != "chat2" || len(page.Logs[0].ToolCalls) != 0 {
+		t.Fatalf("real page1 = %+v", page)
+	}
+	page, err = s.AILogs.List(ctx, AITurnLogFilter{CookieID: "acc1", ProfileID: 7, Simulated: &realOnly, Page: 2, PageSize: 1})
+	if err != nil {
+		t.Fatalf("List page2: %v", err)
+	}
+	if len(page.Logs) != 1 || page.Logs[0].ID != firstID || len(page.Logs[0].ToolCalls) != 2 {
+		t.Fatalf("real page2 = %+v", page)
+	}
+	if page.Logs[0].ToolCalls[0].ToolName != "notify_human" || !page.Logs[0].ToolCalls[0].Success {
+		t.Fatalf("tool calls = %+v", page.Logs[0].ToolCalls)
+	}
+
+	simulatedOnly := true
+	page, err = s.AILogs.List(ctx, AITurnLogFilter{CookieID: "acc1", ProfileID: 7, Simulated: &simulatedOnly})
+	if err != nil {
+		t.Fatalf("List simulated: %v", err)
+	}
+	if page.Total != 1 || !page.Logs[0].Simulated || page.Logs[0].SessionID != "s1" {
+		t.Fatalf("simulated page = %+v", page)
+	}
+	page, err = s.AILogs.List(ctx, AITurnLogFilter{CookieID: "acc1"})
+	if err != nil {
+		t.Fatalf("List all profiles: %v", err)
+	}
+	if page.Total != 4 || page.PageSize != 20 {
+		t.Fatalf("all page = %+v", page)
+	}
+}
+
 func TestAITurnLogStore_InsertAndDeleteBefore(t *testing.T) {
 	s, cleanup := newTestDB(t)
 	defer cleanup()

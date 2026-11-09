@@ -4,7 +4,7 @@ import {
   AdminStats, DashboardStats, Card, CardItem, CardItemPage, CardItemStatus, CardKind, CardStock, CardSalePage, CardSaleStatus, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, ItemGreetingRule, ItemGreetingRuleInput, AutomationAction, AutomationTriggerType, DeliveryTemplate, DeliveryTemplateBinding,
   NotificationChannel, NotificationEventType, AIProfile, AIProfileInput, AIForbiddenWord,
-  AISimulationInput, AISimulationResponse,
+  AISimulationInput, AISimulationResponse, AITurnLogPage, AITurnLogSource,
   AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
@@ -62,6 +62,7 @@ export const updateAIProfile = async (id: number, input: Partial<AIProfileInput>
 export const deleteAIProfile = async (id: number): Promise<ApiResponse> => del(`/ai-profiles/${id}`);
 export const replaceAIProfileItems = async (id: number, itemIds: string[]): Promise<ApiResponse> => put(`/ai-profiles/${id}/items`, { item_ids: itemIds });
 export const simulateAIProfile = async (id: number, input: AISimulationInput): Promise<AISimulationResponse> => post(`/ai-profiles/${id}/simulate`, input);
+export const getAITurnLogs = async (id: number, params: { simulated?: AITurnLogSource; outcome?: string; page?: number; page_size?: number } = {}): Promise<AITurnLogPage> => get(`/ai-profiles/${id}/turn-logs`, params);
 export const getAIForbiddenWords = async (): Promise<AIForbiddenWord[]> => get('/ai-forbidden-words');
 export const replaceAIForbiddenWords = async (rules: AIForbiddenWord[]): Promise<ApiResponse> => put('/ai-forbidden-words', { rules });
 

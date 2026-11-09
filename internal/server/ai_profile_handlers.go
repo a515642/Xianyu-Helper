@@ -48,6 +48,7 @@ func (s *Server) mountAIProfiles(r chi.Router) {
 	r.Delete("/ai-profiles/{id}", s.deleteAIProfile)
 	r.Put("/ai-profiles/{id}/items", s.replaceAIProfileItems)
 	r.Post("/ai-profiles/{id}/simulate", s.simulateAIProfile)
+	r.Get("/ai-profiles/{id}/turn-logs", s.listAITurnLogs)
 }
 
 func (s *Server) mountAIForbiddenWords(r chi.Router) {

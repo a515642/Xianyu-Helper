@@ -163,6 +163,41 @@ export interface AISimulationResponse {
   history: { role: 'user' | 'assistant'; content: string }[];
 }
 
+export interface AITurnLog {
+  id: number;
+  ai_profile_id: number;
+  cookie_id: string;
+  chat_id: string;
+  item_id: string;
+  user_id: string;
+  simulated: boolean;
+  session_id: string;
+  system_prompt: string;
+  prompt_hash: string;
+  model: string;
+  thinking_mode: string;
+  reply_mode: 'text' | 'tools';
+  outcome: 'sent' | 'skipped' | 'empty' | 'error' | string;
+  error_type: string;
+  reply_text: string;
+  reasoning: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+  created_at: string;
+  tool_calls: AISimulationToolCall[];
+}
+
+export interface AITurnLogPage {
+  logs: AITurnLog[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export type AITurnLogSource = 'real' | 'simulated' | 'all';
+
 export interface AccountTaskSettings {
 	auto_freeshipping_enabled?: boolean;
 	auto_red_flower_enabled?: boolean;
