@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"regexp"
 	"strings"
 	"time"
@@ -20,13 +21,33 @@ import (
 
 // ReplyResult 回复结果。
 type ReplyResult struct {
-	Text      string // 文本回复（可空）
-	ImageURL  string // 图片回复（可空）
-	Source    string // 回复来源：API/关键词/AI/默认/商品首次回复
-	Skip      bool   // true 表示匹配到空回复，不发送任何内容
-	ReplyOnce bool   // 仅一次性回复使用，发送状态由 Handle 持久化
+	Text      string   // 文本回复（可空）
+	Texts     []string // AI 工具模式的多段回复；非空时优先于 Text，按顺序发送
+	ImageURL  string   // 图片回复（可空）
+	Source    string   // 回复来源：API/关键词/AI/默认/商品首次回复
+	Skip      bool     // true 表示匹配到空回复，不发送任何内容
+	ReplyOnce bool     // 仅一次性回复使用，发送状态由 Handle 持久化
 	// records 是一次性回复使用的投递记录表；为空时使用账号默认回复记录。
 	records replyRecordStore
+}
+
+// textSegments 返回需要发送的文本段。Texts 优先，兼容旧的单段 Text。
+func (r *ReplyResult) textSegments() []string {
+	if r == nil {
+		return nil
+	}
+	if len(r.Texts) > 0 {
+		return r.Texts
+	}
+	if r.Text != "" {
+		return []string{r.Text}
+	}
+	return nil
+}
+
+// TextContent 返回用于观测与日志的完整文本。
+func (r *ReplyResult) TextContent() string {
+	return strings.Join(r.textSegments(), "\n")
 }
 
 // replyRecordStore 是一条回复按会话去重所需的持久化投递状态。
@@ -84,6 +105,23 @@ func NewReplyService(cookieID string, store *db.Store, sender MessageSender,
 // AI 助手回复，避免与真人卖家在回复上形成竞态。
 const humanTakeoverWindow = 5 * time.Minute
 
+// segmentSendDelay 返回两条分段消息之间的等待时长，模拟真人打字节奏。
+var segmentSendDelay = func() time.Duration {
+	return time.Duration(1000+rand.Intn(500)) * time.Millisecond
+}
+
+// waitSegmentGap 在分段发送之间等待；ctx 取消时立即停止，避免无人消费的 goroutine 继续发送。
+func waitSegmentGap(ctx context.Context) error {
+	timer := time.NewTimer(segmentSendDelay())
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // humanTakeoverActive 判断当前是否应由真人卖家接管（AI 让位）。
 // 让位窗口从"最后一条真人卖家消息"起算，真人持续回复则窗口不断顺延；
 // 窗口内买家消息不回复；买家消息后 5 分钟仍无真人回复时，AI 助手恢复接管。
@@ -130,7 +168,7 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	if err := r.deliver(ctx, m, res); err != nil {
 		return err
 	}
-	r.logger.Info("AI诊断：回复链发送完成", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source, "text_len", len([]rune(res.Text)), "duration", time.Since(started).Round(time.Millisecond))
+	r.logger.Info("AI诊断：回复链发送完成", "chat_id", m.ChatID, "item_id", m.ItemID, "source", res.Source, "text_len", len([]rune(res.TextContent())), "segments", len(res.textSegments()), "duration", time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
@@ -140,11 +178,12 @@ func (r *ReplyService) deliver(ctx context.Context, m ChatMessage, res *ReplyRes
 	if records == nil {
 		records = r.store.DefaultReps
 	}
+	segments := res.textSegments()
 	record := db.DefaultReplyRecord{}
 	if res.ReplyOnce && m.ChatID != "" {
 		var claimed bool
 		var err error
-		record, claimed, err = records.ClaimRecord(ctx, r.cookieID, m.ChatID, res.Text != "", res.ImageURL != "")
+		record, claimed, err = records.ClaimRecord(ctx, r.cookieID, m.ChatID, len(segments) > 0, res.ImageURL != "")
 		if err != nil {
 			return fmt.Errorf("领取%s回复发送任务: %w", res.Source, err)
 		}
@@ -167,11 +206,19 @@ func (r *ReplyService) deliver(ctx context.Context, m ChatMessage, res *ReplyRes
 			}
 		}
 	}
-	if res.Text != "" && !record.TextSent {
-		if err := r.sender.SendText(ctx, m.ChatID, m.SenderUserID, res.Text); err != nil {
-			r.logger.Error("发送回复文本失败", "err", err)
-			r.markReplyFailure(ctx, res, m, err)
-			return err
+	if len(segments) > 0 && !record.TextSent {
+		for i, segment := range segments {
+			if i > 0 {
+				if err := waitSegmentGap(ctx); err != nil {
+					r.markReplyFailure(ctx, res, m, err)
+					return err
+				}
+			}
+			if err := r.sender.SendText(ctx, m.ChatID, m.SenderUserID, segment); err != nil {
+				r.logger.Error("发送回复文本失败", "err", err, "segment", i+1, "segments", len(segments))
+				r.markReplyFailure(ctx, res, m, err)
+				return err
+			}
 		}
 		if res.ReplyOnce && m.ChatID != "" {
 			if err := records.MarkPartSent(ctx, r.cookieID, m.ChatID, "text"); err != nil {

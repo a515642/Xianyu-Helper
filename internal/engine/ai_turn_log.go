@@ -105,9 +105,9 @@ func (a *AIReplierImpl) recordAITurn(trace *aiTurnTrace, result *ReplyResult, re
 		entry.Outcome = "empty"
 	case result.Skip:
 		entry.Outcome = "skipped"
-	case strings.TrimSpace(result.Text) != "":
+	case strings.TrimSpace(result.TextContent()) != "":
 		entry.Outcome = "sent"
-		entry.ReplyText = result.Text
+		entry.ReplyText = result.TextContent()
 	default:
 		entry.Outcome = "empty"
 	}

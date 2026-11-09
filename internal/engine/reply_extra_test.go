@@ -4,9 +4,35 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"xianyu-go/internal/db"
 )
+
+// TestReplyServiceSendsAISegmentsInOrder AI 工具模式的多段回复按顺序逐条发送。
+func TestReplyServiceSendsAISegmentsInOrder(t *testing.T) {
+	s, cleanup := newReplyStore(t)
+	defer cleanup()
+	oldDelay := segmentSendDelay
+	segmentSendDelay = func() time.Duration { return time.Millisecond }
+	defer func() { segmentSendDelay = oldDelay }()
+
+	ai := &fakeAIReplier{result: &ReplyResult{Texts: []string{"你好", "在的", "有什么需要"}}}
+	sender := &recordingSender{}
+	service := NewReplyService("cid", s, sender, nil, ai, nil)
+	if err := service.Handle(context.Background(), chatMsg("在吗", "", "chat-segments")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	want := []string{"你好", "在的", "有什么需要"}
+	if len(sender.texts) != len(want) {
+		t.Fatalf("texts=%+v want %d segments", sender.texts, len(want))
+	}
+	for i, text := range want {
+		if sender.texts[i].text != text {
+			t.Fatalf("segment %d=%q want %q", i, sender.texts[i].text, text)
+		}
+	}
+}
 
 // fakeAPIReplier 可控的 API 回复 mock：返回预设结果或错误。
 type fakeAPIReplier struct {

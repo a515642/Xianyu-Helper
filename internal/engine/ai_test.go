@@ -229,7 +229,7 @@ func TestAIReply_WritesTurnLog(t *testing.T) {
 		wantReply   string
 	}{
 		{name: "sent", content: "你好，在的哦", wantOutcome: "sent", wantReply: "你好，在的哦"},
-		{name: "skipped", content: "无需回复 <exit>", wantOutcome: "skipped"},
+		{name: "empty", content: "<exit>", wantOutcome: "empty"},
 		{name: "error", status: http.StatusInternalServerError, wantOutcome: "error"},
 	}
 	for _, tc := range cases {
@@ -253,6 +253,134 @@ func TestAIReply_WritesTurnLog(t *testing.T) {
 				t.Fatal("error turn should record error_type")
 			}
 		})
+	}
+}
+
+// mockOpenAIToolServer 按顺序返回预设响应，用于多轮工具循环测试。
+func mockOpenAIToolServer(t *testing.T, responses ...map[string]any) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls >= len(responses) {
+			http.Error(w, "no more responses", http.StatusInternalServerError)
+			return
+		}
+		resp := responses[calls]
+		calls++
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func toolCallResponse(name, arguments string) map[string]any {
+	return map[string]any{"choices": []any{map[string]any{"message": map[string]any{
+		"role": "assistant",
+		"tool_calls": []any{map[string]any{
+			"id":       "call-1",
+			"type":     "function",
+			"function": map[string]any{"name": name, "arguments": arguments},
+		}},
+	}}}}
+}
+
+func chatResponse(content string) map[string]any {
+	return map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}}}}
+}
+
+// TestAIReplyToolsModeSendReply send_reply 的多段消息通过 Texts 返回，并写入对话历史。
+func TestAIReplyToolsModeSendReply(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&requestBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toolCallResponse(sendReplyToolName, `{"messages":["你好","在的哦"]}`))
+	}))
+	t.Cleanup(srv.Close)
+	profileID := enableTestAI(t, s, srv.URL, "tools-ai")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE ai_profiles SET reply_mode='tools' WHERE id=?`, profileID); err != nil {
+		t.Fatal(err)
+	}
+
+	replier := NewAIReplier("cid", s, nil)
+	replier.SetOrderPriceAdjuster(&diagnosticPriceAdjuster{})
+	res, err := replier.Reply(ctx, chatMsg("在吗", "item1", "chat-tools"))
+	if err != nil || res == nil || res.Skip || len(res.Texts) != 2 || res.Texts[0] != "你好" || res.Texts[1] != "在的哦" {
+		t.Fatalf("result=%+v err=%v", res, err)
+	}
+	if requestBody["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice=%#v want auto", requestBody["tool_choice"])
+	}
+	tools, _ := requestBody["tools"].([]any)
+	if len(tools) != 3 {
+		t.Fatalf("tools=%#v want send_reply/skip_reply/adjust_order_price", tools)
+	}
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-tools", "item1", 10)
+	if err != nil || len(history) != 2 || history[1].Content != "你好\n在的哦" || history[1].Intent != "reply" {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	var outcome, replyText, replyMode string
+	if err := s.DB.QueryRowContext(ctx, `SELECT outcome,reply_text,reply_mode FROM ai_turn_logs WHERE chat_id=?`, "chat-tools").Scan(&outcome, &replyText, &replyMode); err != nil {
+		t.Fatalf("turn log: %v", err)
+	}
+	if outcome != "sent" || replyText != "你好\n在的哦" || replyMode != "tools" {
+		t.Fatalf("turn log outcome=%q reply=%q mode=%q", outcome, replyText, replyMode)
+	}
+}
+
+// TestAIReplyToolsModeSkipReply skip_reply 返回 Skip，并记录跳过标记供下一轮参考。
+func TestAIReplyToolsModeSkipReply(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv, _ := mockOpenAIToolServer(t, toolCallResponse(skipReplyToolName, `{"reason":"只是表情"}`))
+	profileID := enableTestAI(t, s, srv.URL, "tools-skip-ai")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE ai_profiles SET reply_mode='tools' WHERE id=?`, profileID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("[微笑]", "item1", "chat-tools-skip"))
+	if err != nil || res == nil || !res.Skip || len(res.Texts) != 0 {
+		t.Fatalf("result=%+v err=%v", res, err)
+	}
+	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-tools-skip", "item1", 10)
+	if err != nil || len(history) != 2 || history[1].Content != "[未回复]" || history[1].Intent != "skip_reply" {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	var outcome string
+	if err := s.DB.QueryRowContext(ctx, `SELECT outcome FROM ai_turn_logs WHERE chat_id=?`, "chat-tools-skip").Scan(&outcome); err != nil || outcome != "skipped" {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+}
+
+// TestAIReplyToolsModeLoopsUntilReply 非终止工具调用（未知工具）不会结束循环，下一轮仍可发送。
+func TestAIReplyToolsModeLoopsUntilReply(t *testing.T) {
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	srv, calls := mockOpenAIToolServer(t,
+		toolCallResponse("unknown_tool", `{}`),
+		toolCallResponse(sendReplyToolName, `{"messages":["好的"]}`),
+	)
+	profileID := enableTestAI(t, s, srv.URL, "tools-loop-ai")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE ai_profiles SET reply_mode='tools' WHERE id=?`, profileID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("在吗", "item1", "chat-tools-loop"))
+	if err != nil || res == nil || len(res.Texts) != 1 || res.Texts[0] != "好的" {
+		t.Fatalf("result=%+v err=%v", res, err)
+	}
+	if *calls != 2 {
+		t.Fatalf("LLM calls=%d want 2", *calls)
+	}
+	var toolCalls int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM ai_tool_calls c JOIN ai_turn_logs l ON l.id=c.turn_log_id WHERE l.chat_id=?`, "chat-tools-loop").Scan(&toolCalls); err != nil || toolCalls != 2 {
+		t.Fatalf("tool calls=%d err=%v", toolCalls, err)
 	}
 }
 
@@ -285,8 +413,8 @@ func TestAIReply_ThinkingModeDoesNotForceFunctionToolChoice(t *testing.T) {
 	if err != nil || result == nil || result.Text != "思考模式回复" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if _, ok := requestBody["tool_choice"]; ok {
-		t.Fatalf("thinking mode must not force function tool_choice: %#v", requestBody["tool_choice"])
+	if requestBody["tool_choice"] != "auto" {
+		t.Fatalf("thinking mode should let the model choose tools: %#v", requestBody["tool_choice"])
 	}
 	tools, ok := requestBody["tools"].([]any)
 	if !ok || len(tools) != 1 {
@@ -313,25 +441,24 @@ func TestAIReply_NonBargainBoundItemAndForbiddenWords(t *testing.T) {
 	}
 }
 
-func TestAIReplyExitPersistsContextWithoutSending(t *testing.T) {
+// TestAIReplyLegacyExitMarkerIsStripped <exit> 约定已废弃：只做防御性清理，不发给买家。
+func TestAIReplyLegacyExitMarkerIsStripped(t *testing.T) {
 	s, cleanup := newAIStore(t)
 	defer cleanup()
 	ctx := context.Background()
 	srv := mockOpenAIServer(t, 0, "无需回复 <exit>")
-	profileID := enableTestAI(t, s, srv.URL, "silent-ai")
+	enableTestAI(t, s, srv.URL, "silent-ai")
 	res, err := NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("谢谢", "item1", "chat-silent"))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || res == nil || res.Skip || res.Text != "无需回复" {
+		t.Fatalf("result=%+v err=%v", res, err)
 	}
-	if res == nil || !res.Skip || res.Text != "" {
-		t.Fatalf("silent result=%+v", res)
-	}
-	history, err := s.AIReply.ProfileConversationHistory(ctx, profileID, "cid", "chat-silent", "item1", 10)
-	if err != nil || len(history) != 2 {
-		t.Fatalf("history=%+v err=%v", history, err)
-	}
-	if history[1].Content != "无需回复 <exit>" || history[1].Intent != "silent_exit" {
-		t.Fatalf("assistant history=%+v", history[1])
+
+	// 仅含标记时按空回复处理，不写半轮历史。
+	srvEmpty := mockOpenAIServer(t, 0, "<exit>")
+	enableTestAI(t, s, srvEmpty.URL, "silent-ai-2")
+	res, err = NewAIReplier("cid", s, nil).Reply(ctx, chatMsg("好的", "item1", "chat-silent-2"))
+	if err != nil || res != nil {
+		t.Fatalf("空标记应返回 nil,nil: res=%+v err=%v", res, err)
 	}
 }
 

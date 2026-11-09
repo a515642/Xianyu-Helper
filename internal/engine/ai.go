@@ -103,42 +103,51 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 		return nil, fmt.Errorf("读取 AI 对话历史失败: %w", err)
 	}
 	a.logger.Debug("AI诊断：AI 请求上下文已准备", "profile", profile.ID, "chat_id", m.ChatID, "item_id", m.ItemID, "history_count", len(history), "bargain_enabled", profile.BargainStrategyEnabled, "model", aiCfg.Model, "endpoint_host", endpointHost(aiCfg.BaseURL))
-	withinBargainLimit := true
 	var systemPrompt string
-	if profile.BargainStrategyEnabled {
+	if profile.ReplyMode == "tools" {
+		systemPrompt = a.buildAgentSystemPrompt(ctx, profile, itemTitle, itemPrice, itemDesc, bargainCount)
+	} else if profile.BargainStrategyEnabled {
 		systemPrompt = buildSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc, profile.MaxDiscountPercent, profile.MaxDiscountAmount, profile.MaxBargainRounds, bargainCount)
 		systemPrompt += "\n请自行判断买家是否在议价；只有确实需要议价时才考虑后续改价工具。"
 	} else {
 		systemPrompt = buildGeneralSystemPrompt(profile.CustomPrompts, itemTitle, itemPrice, itemDesc)
 	}
 	trace := newAITurnTrace(started, a, m, profile, aiCfg, systemPrompt)
-	result, replyErr := a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, withinBargainLimit, trace)
+	var result *ReplyResult
+	var replyErr error
+	if profile.ReplyMode == "tools" {
+		result, replyErr = a.replyWithAgent(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, trace)
+	} else {
+		result, replyErr = a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, true, trace)
+	}
 	a.recordAITurn(trace, result, replyErr)
 	a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
 	return result, replyErr
 }
 
-func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool, trace *aiTurnTrace) (*ReplyResult, error) {
-	// 调 OpenAI 兼容接口。地址为空时不回退 SDK 默认服务商（那会把买家消息发到
-	// 用户没有配置的地址），直接报错要求先配置。
+// newAICompletionClient 构造 OpenAI 兼容客户端。地址为空时不回退 SDK 默认服务商
+// （那会把买家消息发到用户没有配置的地址），直接报错要求先配置。
+func (a *AIReplierImpl) newAICompletionClient(profileID int64, aiCfg *globalAIConfig) (*openai.Client, *aiRequestProbe, error) {
 	if strings.TrimSpace(aiCfg.BaseURL) == "" {
-		return nil, errors.New("未配置 AI API 地址，请先在系统设置或该 AI 助手里填写")
+		return nil, nil, errors.New("未配置 AI API 地址，请先在系统设置或该 AI 助手里填写")
 	}
 	if strings.TrimSpace(aiCfg.Model) == "" {
-		return nil, errors.New("未选择 AI 模型，请先在系统设置或该 AI 助手里填写")
+		return nil, nil, errors.New("未选择 AI 模型，请先在系统设置或该 AI 助手里填写")
 	}
 	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
 	clientCfg.BaseURL = aiCfg.BaseURL
-	var err error
-	clientCfg.HTTPClient, err = newAIHTTPClient(clientCfg.BaseURL)
+	httpClient, err := newAIHTTPClient(clientCfg.BaseURL)
 	if err != nil {
-		a.logger.Warn("AI诊断：创建 AI HTTP 客户端失败", "profile", profile.ID, "endpoint_host", endpointHost(aiCfg.BaseURL), "error_type", fmt.Sprintf("%T", err))
-		return nil, fmt.Errorf("AI API 地址无效: %w", err)
+		a.logger.Warn("AI诊断：创建 AI HTTP 客户端失败", "profile", profileID, "endpoint_host", endpointHost(aiCfg.BaseURL), "error_type", fmt.Sprintf("%T", err))
+		return nil, nil, fmt.Errorf("AI API 地址无效: %w", err)
 	}
 	probe := &aiRequestProbe{}
-	clientCfg.HTTPClient = &aiObservingClient{base: clientCfg.HTTPClient, probe: probe}
-	client := openai.NewClientWithConfig(clientCfg)
+	clientCfg.HTTPClient = &aiObservingClient{base: httpClient, probe: probe}
+	return openai.NewClientWithConfig(clientCfg), probe, nil
+}
 
+// buildChatMessages 组装 system 提示词、最近对话历史和当前买家消息。
+func buildChatMessages(systemPrompt string, history []db.AIConversationMessage, current string) []openai.ChatCompletionMessage {
 	messages := []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleSystem, Content: systemPrompt}}
 	for _, message := range history {
 		role := openai.ChatMessageRoleUser
@@ -147,7 +156,15 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 		}
 		messages = append(messages, openai.ChatCompletionMessage{Role: role, Content: truncateAIContent(message.Content)})
 	}
-	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: m.Text})
+	return append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: current})
+}
+
+func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool, trace *aiTurnTrace) (*ReplyResult, error) {
+	client, probe, err := a.newAICompletionClient(profile.ID, aiCfg)
+	if err != nil {
+		return nil, err
+	}
+	messages := buildChatMessages(systemPrompt, history, m.Text)
 
 	aiCtx, cancel := context.WithTimeout(ctx, aiRequestTimeout)
 	defer cancel()
@@ -163,12 +180,8 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 	}
 	if toolEnabled {
 		request.Tools = []openai.Tool{adjustOrderPriceTool()}
-		// DeepSeek reasoning mode rejects a forced function tool_choice. Keep the
-		// tool available and let the model decide whether to call it; non-thinking
-		// providers retain the stricter forced choice for bargain requests.
-		if aiCfg.ThinkingMode != "enabled" {
-			request.ToolChoice = openai.ToolChoice{Type: openai.ToolTypeFunction, Function: openai.ToolFunction{Name: adjustOrderPriceToolName}}
-		}
+		// 不强制 tool_choice：思考模式服务商会拒绝强制函数调用，且议价应由模型判断。
+		request.ToolChoice = "auto"
 	}
 	// DashScope and compatible providers accept this extension for reasoning mode.
 	request.ChatTemplateKwargs = map[string]any{"thinking": map[string]string{"type": aiCfg.ThinkingMode}}
@@ -235,43 +248,33 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 	} else if len(message.ToolCalls) > 0 {
 		a.logger.Warn("AI诊断：收到工具调用但改价工具未启用", "profile", profile.ID, "chat_id", m.ChatID, "tool_calls", len(message.ToolCalls))
 	}
-	reply := strings.TrimSpace(message.Content)
+	// <exit> 约定已废弃；这里仅做防御性清理，避免旧模型把标记发给买家。
+	reply := strings.TrimSpace(strings.ReplaceAll(message.Content, "<exit>", ""))
 	if reply == "" {
 		a.logger.Info("AI诊断：LLM 最终回复为空", "profile", profile.ID, "chat_id", m.ChatID)
 		return nil, nil
 	}
-	silentExit := strings.Contains(reply, "<exit>")
-	a.logger.Info("AI诊断：得到 LLM 最终回复", "profile", profile.ID, "chat_id", m.ChatID, "silent_exit", silentExit, "content_len", len([]rune(reply)))
-	if !silentExit {
-		reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
-		if err != nil {
-			return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
-		}
-		reply = strings.TrimSpace(reply)
-		if reply == "" {
-			a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
-			return nil, nil
-		}
+	a.logger.Info("AI诊断：得到 LLM 最终回复", "profile", profile.ID, "chat_id", m.ChatID, "content_len", len([]rune(reply)))
+	reply, err = a.store.AIProfiles.ApplyForbiddenWords(ctx, reply)
+	if err != nil {
+		return nil, fmt.Errorf("应用 AI 违禁词失败: %w", err)
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
+		return nil, nil
 	}
 	if m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
 		if profile.BargainStrategyEnabled {
 			intent = "bargain"
 		}
-		assistantIntent := "reply"
-		if silentExit {
-			assistantIntent = "silent_exit"
-		}
 		if err := a.store.AIReply.AddProfileConversationExchange(ctx, profile.ID, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
 			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: intent, BargainCount: bargainCount},
-			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: assistantIntent, BargainCount: bargainCount},
+			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply", BargainCount: bargainCount},
 		); err != nil {
 			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
 		}
-	}
-	if silentExit {
-		a.logger.Info("AI 选择静默处理消息", "profile", profile.ID, "chat", m.ChatID)
-		return &ReplyResult{Skip: true}, nil
 	}
 	return &ReplyResult{Text: reply}, nil
 }
@@ -414,7 +417,8 @@ func (a *AIReplierImpl) conversationContext(ctx context.Context, profileID int64
 	if m.ChatID == "" || m.ItemID == "" {
 		return nil, 0, false, nil
 	}
-	history, err := a.store.AIReply.ProfileConversationHistory(ctx, profileID, a.cookieID, m.ChatID, m.ItemID, 10)
+	// 保留最近 10 轮对话（user/assistant 各一条），给工具模式提供足够的上下文。
+	history, err := a.store.AIReply.ProfileConversationHistory(ctx, profileID, a.cookieID, m.ChatID, m.ItemID, 20)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -554,7 +558,12 @@ func buildSystemPrompt(customPrompts, itemTitle string, itemPrice float64, itemD
 3. 不要编造商品没有的功能
 4. 直接回复内容，不要加引号或解释`, itemTitle, itemPrice, itemDesc)
 	}
-	return base + fmt.Sprintf(`
+	return base + priceSafetyRules(itemPrice, maxDiscountPercent, maxDiscountAmount, maxBargainRounds, bargainCount)
+}
+
+// priceSafetyRules 返回永远追加、不可被自定义提示词覆盖的价格约束。
+func priceSafetyRules(itemPrice float64, maxDiscountPercent, maxDiscountAmount, maxBargainRounds, bargainCount int) string {
+	return fmt.Sprintf(`
 
 不可覆盖的价格安全规则：
 - 原价 %.2f 元；最多优惠 %d%%，且最多优惠 %d 元；两个上限必须同时满足。
@@ -567,7 +576,7 @@ func buildGeneralSystemPrompt(customPrompts, itemTitle string, itemPrice float64
 	if strings.TrimSpace(customPrompts) != "" {
 		return strings.NewReplacer("{{item_title}}", itemTitle, "{{item_price}}", fmt.Sprintf("%.2f", itemPrice), "{{item_description}}", itemDesc, "{item_title}", itemTitle, "{item_price}", fmt.Sprintf("%.2f", itemPrice), "{item_description}", itemDesc).Replace(customPrompts)
 	}
-	return fmt.Sprintf("你是闲鱼卖家的自动回复助手，请根据商品信息自然回复买家。商品名称：%s；价格：%.2f 元；详情：%s。不要编造信息；若无需回复，请输出 <exit>。", itemTitle, itemPrice, itemDesc)
+	return fmt.Sprintf("你是闲鱼卖家的自动回复助手，请根据商品信息自然回复买家。商品名称：%s；价格：%.2f 元；详情：%s。不要编造信息。", itemTitle, itemPrice, itemDesc)
 }
 
 var priceRe = regexp.MustCompile(`[^\d.]`)
