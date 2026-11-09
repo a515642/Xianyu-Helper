@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -84,12 +83,7 @@ func (e *priceToolExecutor) execute(ctx context.Context, raw string) (string, er
 		e.replier.logger.Warn("AI诊断：改价工具商品原价无效", append(toolAttrs, "reason", "invalid_item_price")...)
 		return "", errors.New("商品原价无效")
 	}
-	minimum := itemPrice
-	if e.profile.MaxDiscountPercent > 0 && e.profile.MaxDiscountAmount > 0 {
-		byPercent := itemPrice * (1 - float64(e.profile.MaxDiscountPercent)/100)
-		byAmount := itemPrice - float64(e.profile.MaxDiscountAmount)
-		minimum = math.Max(0, math.Max(byPercent, byAmount))
-	}
+	minimum := minimumAllowedPrice(itemPrice, e.profile.MaxDiscountPercent, e.profile.MaxDiscountAmount, true)
 	if float64(args.TargetPriceCents)/100+0.0001 < minimum || float64(args.TargetPriceCents)/100 > itemPrice+0.0001 {
 		e.replier.logger.Warn("AI诊断：改价工具价格策略校验失败", append(toolAttrs, "minimum_price", minimum, "item_price", itemPrice, "reason", "price_out_of_bounds")...)
 		return "", fmt.Errorf("目标价格必须在 %.2f 到 %.2f 元之间", minimum, itemPrice)

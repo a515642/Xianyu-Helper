@@ -489,11 +489,11 @@ func TestGlobalAIConfig(t *testing.T) {
 		t.Fatalf("默认值异常: %+v", cfg)
 	}
 	// 未配置地址/模型时应由 replyWithPrompt 明确报错，而不是偷偷用默认服务商或模型。
-	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, cfg, "", 0, "", nil, 0, "sys", false, nil); replyErr == nil {
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, cfg, "", 0, "", nil, 0, "sys", false, nil, agentRunOptions{}); replyErr == nil {
 		t.Fatal("未配置 AI 地址时应报错")
 	}
 	emptyCfg := &globalAIConfig{APIKey: "sk-x", BaseURL: "http://127.0.0.1:1"}
-	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, emptyCfg, "", 0, "", nil, 0, "sys", false, nil); replyErr == nil {
+	if _, replyErr := a.replyWithPrompt(ctx, ChatMessage{AccountID: "cid"}, &db.AIProfile{}, emptyCfg, "", 0, "", nil, 0, "sys", false, nil, agentRunOptions{}); replyErr == nil {
 		t.Fatal("未配置模型时应报错")
 	}
 

@@ -87,6 +87,8 @@ type Server struct {
 	qrPersistLocks   sync.Map
 	loginLimiter     *loginFailureLimiter
 	initializationMu sync.Mutex
+	// simSessions 是 AI 助手后台模拟的内存会话，零值即可用。
+	simSessions aiSimulationSessions
 }
 
 // SetChatService installs the shared chat persistence and live event hub.

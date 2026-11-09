@@ -21,12 +21,13 @@ import (
 
 // ReplyResult 回复结果。
 type ReplyResult struct {
-	Text      string   // 文本回复（可空）
-	Texts     []string // AI 工具模式的多段回复；非空时优先于 Text，按顺序发送
-	ImageURL  string   // 图片回复（可空）
-	Source    string   // 回复来源：API/关键词/AI/默认/商品首次回复
-	Skip      bool     // true 表示匹配到空回复，不发送任何内容
-	ReplyOnce bool     // 仅一次性回复使用，发送状态由 Handle 持久化
+	Text       string   // 文本回复（可空）
+	Texts      []string // AI 工具模式的多段回复；非空时优先于 Text，按顺序发送
+	ImageURL   string   // 图片回复（可空）
+	Source     string   // 回复来源：API/关键词/AI/默认/商品首次回复
+	Skip       bool     // true 表示匹配到空回复，不发送任何内容
+	SkipReason string   // 工具模式 skip_reply 的原因，仅用于观测和模拟展示
+	ReplyOnce  bool     // 仅一次性回复使用，发送状态由 Handle 持久化
 	// records 是一次性回复使用的投递记录表；为空时使用账号默认回复记录。
 	records replyRecordStore
 }

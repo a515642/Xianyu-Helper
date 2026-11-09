@@ -116,9 +116,9 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	var result *ReplyResult
 	var replyErr error
 	if profile.ReplyMode == "tools" {
-		result, replyErr = a.replyWithAgent(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, trace)
+		result, replyErr = a.replyWithAgent(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, trace, agentRunOptions{})
 	} else {
-		result, replyErr = a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, true, trace)
+		result, replyErr = a.replyWithPrompt(ctx, m, profile, aiCfg, itemTitle, itemPrice, itemDesc, history, bargainCount, systemPrompt, true, trace, agentRunOptions{})
 	}
 	a.recordAITurn(trace, result, replyErr)
 	a.logger.Info("AI诊断：AI 回复链完成", "profile", profile.ID, "chat_id", m.ChatID, "duration", time.Since(started).Round(time.Millisecond), "has_result", result != nil, "error", replyErr != nil)
@@ -159,7 +159,7 @@ func buildChatMessages(systemPrompt string, history []db.AIConversationMessage, 
 	return append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: current})
 }
 
-func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool, trace *aiTurnTrace) (*ReplyResult, error) {
+func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, withinBargainLimit bool, trace *aiTurnTrace, options agentRunOptions) (*ReplyResult, error) {
 	client, probe, err := a.newAICompletionClient(profile.ID, aiCfg)
 	if err != nil {
 		return nil, err
@@ -169,10 +169,13 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 	aiCtx, cancel := context.WithTimeout(ctx, aiRequestTimeout)
 	defer cancel()
 	request := openai.ChatCompletionRequest{Model: aiCfg.Model, Messages: messages, Temperature: 0.7}
-	toolEnabled := profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil
+	// 模拟模式禁止真实改价：纯文本模式不提供改价工具。
+	toolEnabled := profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil && options.simulation == nil
 	toolReason := "disabled"
 	if !profile.BargainStrategyEnabled {
 		toolReason = "bargain_strategy_disabled"
+	} else if options.simulation != nil {
+		toolReason = "simulation"
 	} else if a.orderPriceAdjuster == nil {
 		toolReason = "order_price_adjuster_missing"
 	} else {
@@ -264,7 +267,7 @@ func (a *AIReplierImpl) replyWithPrompt(ctx context.Context, m ChatMessage, prof
 		a.logger.Warn("AI 回复经违禁词替换后为空，降级到下一回复级别", "profile", profile.ID)
 		return nil, nil
 	}
-	if m.ChatID != "" && m.ItemID != "" {
+	if options.simulation == nil && m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
 		if profile.BargainStrategyEnabled {
 			intent = "bargain"

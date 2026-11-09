@@ -56,6 +56,11 @@ type agentTurnState struct {
 	skipReason string
 }
 
+// agentRunOptions 携带仅模拟模式使用的覆盖项；默认为零值即真实回复。
+type agentRunOptions struct {
+	simulation *aiSimulationOrder
+}
+
 func sendReplyTool() openai.Tool {
 	return openai.Tool{Type: openai.ToolTypeFunction, Function: &openai.FunctionDefinition{
 		Name:        sendReplyToolName,
@@ -137,14 +142,14 @@ func (a *AIReplierImpl) buildAgentSystemPrompt(ctx context.Context, profile *db.
 }
 
 // replyWithAgent 执行工具调用循环，直到模型给出 send_reply/skip_reply 或轮数耗尽。
-func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, trace *aiTurnTrace) (*ReplyResult, error) {
+func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profile *db.AIProfile, aiCfg *globalAIConfig, itemTitle string, itemPrice float64, itemDesc string, history []db.AIConversationMessage, bargainCount int, systemPrompt string, trace *aiTurnTrace, options agentRunOptions) (*ReplyResult, error) {
 	client, _, err := a.newAICompletionClient(profile.ID, aiCfg)
 	if err != nil {
 		return nil, err
 	}
 	messages := buildChatMessages(systemPrompt, history, m.Text)
 	tools := []openai.Tool{sendReplyTool(), skipReplyTool()}
-	toolEnabled := profile.BargainStrategyEnabled && a.orderPriceAdjuster != nil
+	toolEnabled := profile.BargainStrategyEnabled && (a.orderPriceAdjuster != nil || options.simulation != nil)
 	if toolEnabled {
 		tools = append(tools, adjustOrderPriceTool())
 	}
@@ -192,7 +197,7 @@ func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profi
 		stop := false
 		for _, call := range message.ToolCalls {
 			toolStarted := time.Now()
-			result, callErr := a.executeAgentTool(budgetCtx, call, profile, itemPrice, m, state)
+			result, callErr := a.executeAgentTool(budgetCtx, call, profile, itemPrice, m, state, options)
 			if callErr != nil {
 				a.logger.Warn("AI诊断：工具执行失败", "profile", profile.ID, "chat_id", m.ChatID, "round", rounds, "tool", call.Function.Name, "error_type", fmt.Sprintf("%T", callErr))
 				result = "工具执行失败：" + callErr.Error()
@@ -219,7 +224,7 @@ func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profi
 		assistantContent = "[未回复]"
 		assistantIntent = "skip_reply"
 	}
-	if m.ChatID != "" && m.ItemID != "" {
+	if options.simulation == nil && m.ChatID != "" && m.ItemID != "" {
 		intent := "chat"
 		if profile.BargainStrategyEnabled {
 			intent = "bargain"
@@ -233,14 +238,14 @@ func (a *AIReplierImpl) replyWithAgent(ctx context.Context, m ChatMessage, profi
 	}
 	if state.skip {
 		a.logger.Info("AI 工具模式选择跳过回复", "profile", profile.ID, "chat", m.ChatID, "reason_len", len([]rune(state.skipReason)))
-		return &ReplyResult{Skip: true}, nil
+		return &ReplyResult{Skip: true, SkipReason: state.skipReason}, nil
 	}
 	a.logger.Info("AI诊断：工具模式生成回复", "profile", profile.ID, "chat_id", m.ChatID, "segments", len(state.segments), "rounds", rounds)
 	return &ReplyResult{Texts: state.segments}, nil
 }
 
 // executeAgentTool 执行单个工具调用；返回给模型的结果文本。
-func (a *AIReplierImpl) executeAgentTool(ctx context.Context, call openai.ToolCall, profile *db.AIProfile, itemPrice float64, m ChatMessage, state *agentTurnState) (string, error) {
+func (a *AIReplierImpl) executeAgentTool(ctx context.Context, call openai.ToolCall, profile *db.AIProfile, itemPrice float64, m ChatMessage, state *agentTurnState, options agentRunOptions) (string, error) {
 	switch call.Function.Name {
 	case sendReplyToolName:
 		if state.skip {
@@ -261,7 +266,14 @@ func (a *AIReplierImpl) executeAgentTool(ctx context.Context, call openai.ToolCa
 		state.skipReason = strings.TrimSpace(args.Reason)
 		return "已记录：本次不回复", nil
 	case adjustOrderPriceToolName:
-		if !profile.BargainStrategyEnabled || a.orderPriceAdjuster == nil {
+		if !profile.BargainStrategyEnabled {
+			return "", errors.New("改价工具未启用")
+		}
+		if options.simulation != nil {
+			// 模拟模式只做参数与价格策略校验，不调用平台改价接口。
+			return a.executeSimulatedPriceTool(options.simulation, call.Function.Arguments, profile, itemPrice)
+		}
+		if a.orderPriceAdjuster == nil {
 			return "", errors.New("改价工具未启用")
 		}
 		executor := &priceToolExecutor{replier: a, profile: profile, itemPrice: itemPrice, orderClient: a.orderPriceAdjuster, cookies: m.CookieStr, chatID: m.ChatID, buyerID: m.SenderUserID}
